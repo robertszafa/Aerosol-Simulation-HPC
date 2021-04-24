@@ -7,9 +7,9 @@
   this code go faster subject to following the formal definition of
   your assignment. You should add necessary error handling and
   your final code should work on any number of parallel processing
-  elements. 
+  elements.
 
-  This code is a simplistic model of aerosol processes as described in a 
+  This code is a simplistic model of aerosol processes as described in a
   forthcoming book by Topping & Bane (Wiley).
 */
 
@@ -38,7 +38,7 @@ int main(int argc, char* argv[]) {
   double *old_x, *old_y, *old_z, *old_mass;            // save previous values whilst doing global updates
   double totalMass, systemEnergy;  // for stats
 
-  double start=omp_get_wtime();   // we make use of the simple wall clock timer available in OpenMP 
+  double start=omp_get_wtime();   // we make use of the simple wall clock timer available in OpenMP
 
   /* if avail, input size of system */
   if (argc > 1 ) {
@@ -72,7 +72,7 @@ int main(int argc, char* argv[]) {
   if (old_mass == NULL) {
     printf("\n ERROR in malloc for (at least) old_mass - aborting\n");
     return -99;
-  } 
+  }
   else {
     printf("  (malloc-ed)  ");
   }
@@ -95,7 +95,7 @@ int main(int argc, char* argv[]) {
   systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
   printf("Time 0. System energy=%g\n", systemEnergy);
 
-  /* 
+  /*
      MAIN TIME STEPPING LOOP
 
      We 'save' old (entry to timestep loop) values to use on RHS of:
@@ -108,10 +108,10 @@ int main(int argc, char* argv[]) {
 
      Having looped over the particles (using 'old' values on the right
      hand side as a crude approximation to real life) we then have
-     updated all particles independently. 
+     updated all particles independently.
 
      We then determine the total mass & the system energy of the
-     system. 
+     system.
 
      The final statement of each time-stepping loop is to decrease the
      temperature of the system, T.
@@ -157,8 +157,8 @@ int main(int argc, char* argv[]) {
           vy[i] += ay;
 	  vz[i] += az;
         }
-      } 
-      // calc new position 
+      }
+      // calc new position
       x[i] = old_x[i] + vx[i];
       y[i] = old_y[i] + vy[i];
       z[i] = old_z[i] + vz[i];
@@ -195,36 +195,59 @@ int main(int argc, char* argv[]) {
 int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, double *vz, double *gas, double* liquid, double* loss_rate, int num) {
   // random numbers to set initial conditions - do not parallelise or amend order of random number usage
   int i;
-  double comp;
   double min_pos = -50.0, mult = +100.0, maxVel = +10.0;
   double recip = 1.0 / (double)RAND_MAX;
 
-  // create all random numbers 
-  int numToCreate = num*8;
+  // create all random numbers
+  int numToCreate = num * 8;
   double *ranvec;
   ranvec = (double *) malloc(numToCreate * sizeof(double));
   if (ranvec == NULL) {
     printf("\n ERROR in malloc ranvec within init()\n");
     return -99;
-  } 
+  }
+
+  // Don't change order.
   for (i=0; i<numToCreate; i++) {
     ranvec[i] = (double) rand();
   }
 
-  // requirement to access ranvec in same order as if we had just used rand()
+  // Pull invariants and common subexpressions out of the for loop.
+  // Since we're using -O0, the compiler won't do these for us.
+  double recipDivBy2 = recip/2.0;
+  double recipDivBy25 = recip/25.0;
+  double multTimesRecip = mult * recip;
+  double maxVelTimes2 = 2.0*maxVel;
+  double maxVelTimes2TimesRecip = maxVelTimes2 * recip;
+
+  // Each thread accesses the half-open range of [i : i+8) within ranvec.
+  // We can use a chunk size of 8 with the schedule static.
+  #pragma omp parallel for default(none) private(i) \
+                                         shared(ranvec, num, min_pos, recipDivBy2, recipDivBy25, \
+                                                multTimesRecip, maxVelTimes2, \
+                                                maxVelTimes2TimesRecip, maxVel, x, y, z, vx, \
+                                                vy, vz, loss_rate, gas, liquid) \
+                                         schedule(static, 8)
   for (i=0; i<num; i++) {
-    x[i] = min_pos + mult*ranvec[8*i+0] * recip;  
-    y[i] = min_pos + mult*ranvec[8*i+1] * recip;  
-    z[i] = 0.0 + mult*ranvec[8*i+2] * recip;   
-    vx[i] = -maxVel + 2.0*maxVel*ranvec[8*i+3] * recip;   
-    vy[i] = -maxVel + 2.0*maxVel*ranvec[8*i+4] * recip;   
-    vz[i] = -maxVel + 2.0*maxVel*ranvec[8*i+5] * recip;   
-    // proportion of aerosol that evaporates
-    comp = .5 + ranvec[8*i+6]*recip/2.0;
-    loss_rate[i] = 1.0 - ranvec[8*i+7]*recip/25.0;
-    // aerosol is component of gas and (1-comp) of liquid
-    gas[i] = comp;
-    liquid[i] = (1.0-comp);
+  {
+      double *thisRanvec = ranvec + (i << 3); // i*8
+
+      x[i] = min_pos + thisRanvec[0] * multTimesRecip;
+      y[i] = min_pos + thisRanvec[1] * multTimesRecip;
+      z[i] = thisRanvec[2] * multTimesRecip;
+
+      vx[i] = -maxVel + thisRanvec[3] * maxVelTimes2TimesRecip;
+      vy[i] = -maxVel + thisRanvec[4] * maxVelTimes2TimesRecip;
+      vz[i] = -maxVel + thisRanvec[5] * maxVelTimes2TimesRecip;
+
+      // proportion of aerosol that evaporates
+      loss_rate[i] = 1.0 - thisRanvec[7] * recipDivBy25;
+      // aerosol is component of gas and (1-comp) of liquid
+      gas[i] = .5 + thisRanvec[6] * recipDivBy2;
+      liquid[i] = (1.0 - gas[i]);
+    }
+
+    /// Threads join here.
   }
 
   // release temp memory for ranvec which is no longer required
@@ -235,7 +258,7 @@ int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, 
 
 
 double calc_system_energy(double mass, double *vx, double *vy, double *vz, int num) {
-  /* 
+  /*
      energy is sum of 0.5*mass*velocity^2
      where velocity^2 is sum of squares of components
   */
@@ -263,7 +286,7 @@ void calc_centre_mass(double *com, double *x, double *y, double *z, double *mass
   int i, axis;
    // calculate the centre of mass, com(x,y,z)
   for (axis=0; axis<2; axis++) {
-    com[0] = 0.0;     com[1] = 0.0;     com[2] = 0.0; 
+    com[0] = 0.0;     com[1] = 0.0;     com[2] = 0.0;
     for (i=0; i<N; i++) {
       com[0] += mass[i]*x[i];
       com[1] += mass[i]*y[i];

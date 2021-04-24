@@ -6,6 +6,9 @@
 ###    restrictions: this script can only handle single nodes
 ### (c) mkbane, University of Liverpool (2020-2021)
 
+### Slight modifications for COMP328 programming assignment by Robert Szafarczyk, April 2021
+
+
 # Specific course queue
 #SBATCH -p course
 
@@ -18,53 +21,40 @@
 # load intel compiler
 module load compilers/intel
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -lt 1 ]]; then
     echo
     echo ERROR
-    echo $0 -c NUM_THREADS_TO_USE NAME_OF_INPUT.c
+    echo $0 -c NUM_THREADS_TO_USE NAME_OF_INPUT.c [numAerosolParticles, numTimeSteps]
     exit -1
 fi
 
-
-# SLURM terms
-## nodes            relates to number of nodes
-## ntasks-per-node  relates to MPI processes per node
-## cpus-per-task    relates to OpenMP threads (per MPI process)
-
-# determine number of cores requested (NB this is single node implementation)
-## further options available via examples: /opt/apps/Slurm_Examples/sbatch*sh
 echo "Node list                    : $SLURM_JOB_NODELIST"
 echo "Number of nodes allocated    : $SLURM_JOB_NUM_NODES or $SLURM_NNODES"
-echo "Number of threads or processes          : $SLURM_NTASKS"
-echo "Number of processes per node : $SLURM_TASKS_PER_NODE"
-echo "Requested tasks per node     : $SLURM_NTASKS_PER_NODE"
 echo "Requested CPUs per task      : $SLURM_CPUS_PER_TASK"
-echo "Scheduling priority          : $SLURM_PRIO_PROCESS"
 
-# check expected inputs (OpenMP is only supported on a single node)
-if [ "$SLURM_NNODES" -gt "1" ]; then
-    echo more than 1 node not allowed
-    exit
-fi
-
-
-# parallel using OpenMP
 SRC=$1
+# Default, or input if supplied.
+NUM_PARTICLES=20000 && (( $# > 1 )) && NUM_PARTICLES=$2
+NUM_TIME_STEPS=50 && (( $# > 2 )) && NUM_TIME_STEPS=$3
+
 EXE=${SRC%%.c}.exe
 rm -f ${EXE}
 echo compiling $SRC to $EXE
 
-icc -qopenmp -O0 $SRC  -o $EXE
+icc -qopenmp -O0 $SRC -o $EXE
 # icc -qopenmp-stubs -O0 $SRC  -o $EXE
+
+export OMP_PROC_BIND=TRUE
+export OMP_DYNAMIC=FALSE
 
 if test -x $EXE; then
       # set number of threads
       export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1} # if '-c' not used then default to 1
       echo using ${OMP_NUM_THREADS} OpenMP threads
       # run multiple times
-      ./${EXE};echo
-      ./${EXE};echo
-      ./${EXE};echo
+      ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
+      ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
+      ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
 else
      echo $SRC did not built to $EXE
 fi
