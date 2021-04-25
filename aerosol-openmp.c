@@ -19,6 +19,10 @@
 #include <math.h>
 #include <omp.h>
 
+#include <mkl.h>
+#include <immintrin.h>
+
+
 double liquid_mass=2.0, gas_mass=0.3, k=0.00001;
 
 int init(double*, double*, double*, double*, double*, double*, double*, double*, double*, double*, int);
@@ -124,70 +128,156 @@ int main(int argc, char* argv[]) {
 
   printf("Now to integrate for %d timesteps\n", timesteps);
 
+
+  // For swapping poniters.
+  double *tmp_x, *tmp_y, *tmp_z, *tmp_mass;
+
+  // Expand constants into AVX-512 form.
+  double tKExpNegative = exp(-k*T);
+  __m512d vec_tKExpNegative = _mm512_set_pd(tKExpNegative, tKExpNegative, tKExpNegative, tKExpNegative,
+                                            tKExpNegative, tKExpNegative, tKExpNegative, tKExpNegative);
+  __m512d vec_GRAVCONST = _mm512_set_pd(GRAVCONST, GRAVCONST, GRAVCONST, GRAVCONST,
+                                        GRAVCONST, GRAVCONST, GRAVCONST, GRAVCONST);
+  __m512d vec_gas_mass = _mm512_set_pd(gas_mass, gas_mass, gas_mass, gas_mass,
+                                       gas_mass, gas_mass, gas_mass, gas_mass);
+  __m512d vec_liquid_mass = _mm512_set_pd(liquid_mass, liquid_mass, liquid_mass, liquid_mass,
+                                          liquid_mass, liquid_mass, liquid_mass, liquid_mass);
+  __m512d vec_min_d = _mm512_set_pd(0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01);
+  __m512d vec_one = _mm512_set_pd(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+  __m512i vec_num = _mm512_set_epi64(num, num, num, num, num, num, num, num);
+
+
   // time=0 was initial conditions
-  for (time=1; time<=timesteps; time++) {
+  // #pragma omp parallel default(none) private(time, i, j) \
+  //                                    shared(timesteps, tmp_x, tmp_y, tmp_z, tmp_mass)
+  {
+    for (time=1; time<=timesteps; time++) {
 
-    // LOOP1: take snapshot to use on RHS when looping for updates
-    for (i=0; i<num; i++) {
-      old_x[i] = x[i];
-      old_y[i] = y[i];
-      old_z[i] = z[i];
-      old_mass[i] = mass[i];
-    }
+      // Swap pointers insted of moving data.
+      tmp_x = x; old_x = x; x = tmp_x;
+      tmp_y = x; old_y = y; y = tmp_y;
+      tmp_z = z; old_z = z; z = tmp_z;
+      tmp_mass = mass; old_mass = mass; mass = tmp_mass;
 
-    double temp_d, temp_z;
+      // LOOP2: update position etc per particle (based on old data)
+      // #pragma omp for schedule(static, 1)
+      for(i=0; i<num; i += 8) {
+        __m512d vec_old_x, vec_old_y, vec_old_z, vec_old_mass;
 
-    // LOOP2: update position etc per particle (based on old data)
-    for(i=0; i<num; i++) {
-      // calc forces on body i due to particles (j != i)
-      for (j=0; j<num; j++) {
-        if (j != i) {
-          dx = old_x[j] - x[i];
-          dy = old_y[j] - y[i];
-	  dz = old_z[j] - z[i];
-          temp_d =sqrt(dx*dx + dy*dy + dz*dz);
-          d = temp_d>0.01 ? temp_d : 0.01;
-          F = GRAVCONST * mass[i] * old_mass[j] / (d*d);
-	  // calculate acceleration due to the force, F
-          ax = (F/mass[i]) * dx/d;
-          ay = (F/mass[i]) * dy/d;
-	  az = (F/mass[i]) * dz/d;
-	  // approximate velocities in "unit time"
-          vx[i] += ax;
-          vy[i] += ay;
-	  vz[i] += az;
+        // Load into AVX-512 registers.
+        __m512d vec_x = _mm512_load_pd(x + i);
+        __m512d vec_y = _mm512_load_pd(y + i);
+        __m512d vec_z = _mm512_load_pd(z + i);
+        __m512d vec_vx = _mm512_load_pd(vx + i);
+        __m512d vec_vy = _mm512_load_pd(vy + i);
+        __m512d vec_vz = _mm512_load_pd(vz + i);
+        __m512d vec_mass = _mm512_load_pd(mass + i);
+        __m512d vec_gas = _mm512_load_pd(gas + i);
+        __m512d vec_loss_rate = _mm512_load_pd(loss_rate + i);
+        __m512d vec_liquid = _mm512_load_pd(liquid + i);
+
+        // Use masks to cover edge cases, e.g. i>num, i==j, etc.
+        __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+        // i_writeback = (i<num) ? 1 : 0
+        __mmask8 i_writeback = _mm512_cmp_epi64_mask(vec_i, vec_num, 1); // 1: OP := _MM_CMPINT_LT
+
+        // calc forces on body i due to particles (j != i)
+        for (j=0; j<num; j += 8) {
+
+          // if (i == j) or (j > num), don't set j writeback bit.
+          __m512i vec_j = _mm512_set_epi64(j, j+1, j+2, j+3, j+4, j+5, j+6, j+7);
+          __mmask8 is_i_eq_j = _mm512_cmp_epi64_mask(vec_i, vec_j, 4); // 4: OP := _MM_CMPINT_NE
+          __mmask8 j_writeback = _mm512_mask_cmp_epi64_mask(is_i_eq_j, vec_j, vec_num, 1); // 1: LT
+
+          // Load into AVX-512 registers.
+          vec_old_x = _mm512_load_pd(old_x + j);
+          vec_old_y = _mm512_load_pd(old_y + j);
+          vec_old_z = _mm512_load_pd(old_z + j);
+          vec_old_mass = _mm512_load_pd(old_mass + j);
+
+          __m512d vec_dx = _mm512_sub_pd(vec_old_x, vec_x);
+          __m512d vec_dy = _mm512_sub_pd(vec_old_y, vec_y);
+          __m512d vec_dz = _mm512_sub_pd(vec_old_z, vec_z);
+
+          // The expression "a*a + b*b + c*c" can be done using 1 mul and 2 fma ops:
+          //  fma(a, a, fma(b, b, mul(c, c))
+          __m512d vec_temp_d = _mm512_sqrt_pd(_mm512_fmadd_pd(vec_dz, vec_dz,
+                                              _mm512_fmadd_pd(vec_dy, vec_dy,
+                                              _mm512_mul_pd(vec_dx, vec_dx))));
+
+          __m512d vec_d = _mm512_min_pd(vec_temp_d, vec_min_d);
+
+          // vec_F = vec_GRAVCONST * vec_old_mass / (vec_d * vec_d);
+          // Note: mass is not factored in, since when calculating ax, ay, az we do F/mass.
+          __m512d vec_F = _mm512_div_pd(_mm512_mul_pd(vec_GRAVCONST, vec_old_mass),
+                                        _mm512_mul_pd(vec_d, vec_d));
+
+          // calculate acceleration due to the force, F and add to velocities
+          // (approximate velocities in "unit time")
+          // Note: elements where (i==j) or (j>num) are not written back thanks to using a mask.
+          vec_vx = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dx, vec_d), vec_vx, j_writeback);
+          vec_vy = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dy, vec_d), vec_vy, j_writeback);
+          vec_vz = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dz, vec_d), vec_vz, j_writeback);
         }
+
+        // calc new position & store back to mem.
+        // Note: elements where i>num, are not written back thanks to using a mask.
+        vec_x = _mm512_add_pd(vec_old_x, vec_vx); _mm512_mask_store_pd(x + i, i_writeback, vec_x);
+        vec_y = _mm512_add_pd(vec_old_y, vec_vy); _mm512_mask_store_pd(y + i, i_writeback, vec_y);
+        vec_z = _mm512_add_pd(vec_old_z, vec_vz); _mm512_mask_store_pd(z + i, i_writeback, vec_z);
+
+        // temp-dependent condensation from gas to liquid
+        vec_gas = _mm512_mul_pd(vec_gas, _mm512_mul_pd(vec_loss_rate, vec_tKExpNegative));
+        vec_liquid = _mm512_add_pd(vec_one, vec_gas);
+        vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
+                                   _mm512_mul_pd(vec_liquid, vec_liquid_mass));
+
+        // Store gas, liquid and mass
+        _mm512_mask_store_pd(gas + i, i_writeback, vec_gas);
+        _mm512_mask_store_pd(liquid + i, i_writeback, vec_liquid);
+        _mm512_mask_store_pd(mass + i, i_writeback, vec_mass);
+
+        // conserve energy means 0.5*m*v*v remains constant
+        // v_squared = vx*vx + vy*vy + vz*vz
+        __m512d vec_v_squared = _mm512_fmadd_pd(vec_vz, vec_vz,
+                                                _mm512_fmadd_pd(vec_vy, vec_vy,
+
+                                                                _mm512_mul_pd(vec_vx, vec_vx)));
+        __m512d factor = _mm512_div_pd(_mm512_sqrt_pd(_mm512_div_pd(_mm512_mul_pd(vec_old_mass,
+                                                                                  vec_v_squared),
+                                                                    vec_mass)),
+                                       _mm512_sqrt_pd(vec_v_squared));
+        vec_vx = _mm512_mul_pd(factor, vec_vx);
+        vec_vy = _mm512_mul_pd(factor, vec_vy);
+        vec_vz = _mm512_mul_pd(factor, vec_vz);
+
+        // Store vx, vy, vz
+        _mm512_mask_store_pd(vx + i, i_writeback, vec_vx);
+        _mm512_mask_store_pd(vy + i, i_writeback, vec_vy);
+        _mm512_mask_store_pd(vz + i, i_writeback, vec_vz);
+
+      } // end of LOOP 2
+
+      //    output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
+      totalMass = 0.0;
+      for (i=0; i<num; i++) {
+        totalMass += mass[i];
       }
-      // calc new position
-      x[i] = old_x[i] + vx[i];
-      y[i] = old_y[i] + vy[i];
-      z[i] = old_z[i] + vz[i];
-      // temp-dependent condensation from gas to liquid
-      gas[i] *= loss_rate[i] * exp(-k*T);
-      liquid[i] = 1.0 - gas[i];
-      mass[i] = gas[i]*gas_mass + liquid[i]*liquid_mass;
-      // conserve energy means 0.5*m*v*v remains constant
-      double v_squared = vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i];
-      double factor = sqrt(old_mass[i]*v_squared/mass[i])/sqrt(v_squared);
-      vx[i] *= factor;
-      vy[i] *= factor;
-      vz[i] *= factor;
-    } // end of LOOP 2
-    //    output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
-    totalMass = 0.0;
-    for (i=0; i<num; i++) {
-      totalMass += mass[i];
-    }
-    systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
-    printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n", time, T, systemEnergy, totalMass);
-    // temperature drops per timestep
-    T *= 0.99999;
-  } // time steps
+      systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
+
+      // printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n", time, T, systemEnergy, totalMass);
+      // temperature drops per timestep
+      T *= 0.99999;
+    } // time steps
+  }
+
   printf("Time to init+solve %d molecules for %d timesteps is %g seconds\n", num, timesteps, omp_get_wtime()-start);
+
   // output a metric (centre of mass) for checking
   double com[3];
   calc_centre_mass(com, x,y,z,mass,totalMass,num);
   printf("Centre of mass = (%g,%g,%g)\n", com[0], com[1], com[2]);
+
 } // main
 
 
@@ -207,7 +297,7 @@ int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, 
     return -99;
   }
 
-  // Don't change order.
+  // Don't change order
   for (i=0; i<numToCreate; i++) {
     ranvec[i] = (double) rand();
   }
