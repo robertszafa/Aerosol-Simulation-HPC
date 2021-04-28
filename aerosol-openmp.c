@@ -64,20 +64,20 @@ int main(int argc, char* argv[]) {
   printf("Initializing for %d particles in x,y,z space...", num);
 
   /* malloc arrays and pass ref to init(). NOTE: init() uses random numbers */
-  mass = (double *) malloc(num * sizeof(double));
-  x =  (double *) malloc(num * sizeof(double));
-  y =  (double *) malloc(num * sizeof(double));
-  z =  (double *) malloc(num * sizeof(double));
-  vx = (double *) malloc(num * sizeof(double));
-  vy = (double *) malloc(num * sizeof(double));
-  vz = (double *) malloc(num * sizeof(double));
-  gas = (double *) malloc(num * sizeof(double));
-  liquid = (double *) malloc(num * sizeof(double));
-  loss_rate = (double *) malloc(num * sizeof(double));
-  old_x = (double *) malloc(num * sizeof(double));
-  old_y = (double *) malloc(num * sizeof(double));
-  old_z = (double *) malloc(num * sizeof(double));
-  old_mass = (double *) malloc(num * sizeof(double));
+  mass = (double *) aligned_alloc(64, num * sizeof(double));
+  x =  (double *) aligned_alloc(64, num * sizeof(double));
+  y =  (double *) aligned_alloc(64, num * sizeof(double));
+  z =  (double *) aligned_alloc(64, num * sizeof(double));
+  vx = (double *) aligned_alloc(64, num * sizeof(double));
+  vy = (double *) aligned_alloc(64, num * sizeof(double));
+  vz = (double *) aligned_alloc(64, num * sizeof(double));
+  gas = (double *) aligned_alloc(64, num * sizeof(double));
+  liquid = (double *) aligned_alloc(64, num * sizeof(double));
+  loss_rate = (double *) aligned_alloc(64, num * sizeof(double));
+  old_x = (double *) aligned_alloc(64, num * sizeof(double));
+  old_y = (double *) aligned_alloc(64, num * sizeof(double));
+  old_z = (double *) aligned_alloc(64, num * sizeof(double));
+  old_mass = (double *) aligned_alloc(64, num * sizeof(double));
 
   // should check all rc but let's just see if last malloc worked
   if (old_mass == NULL) {
@@ -141,10 +141,6 @@ int main(int argc, char* argv[]) {
   __m512d vec_GRAVCONST = _mm512_set1_pd(GRAVCONST);
   __m512d vec_gas_mass = _mm512_set1_pd(gas_mass);
   __m512d vec_liquid_mass = _mm512_set1_pd(liquid_mass);
-  __m512d vec_min_d = _mm512_set1_pd(0.001);
-  __m512d vec_one = _mm512_set1_pd(1.0);
-  __m512i vec_num = _mm512_set1_epi64(num);
-
 
   // time=0 was initial conditions
   // #pragma omp parallel default(none) private(time, i, j) \
@@ -152,17 +148,17 @@ int main(int argc, char* argv[]) {
   {
     for (time=1; time<=timesteps; time++) {
 
-      // Swap pointers insted of moving data.
-      // double *tmp_x, *tmp_y, *tmp_z, *tmp_mass;
-      // tmp_x = old_x; old_x = x; x = tmp_x;
-      // tmp_y = old_x; old_y = y; y = tmp_y;
-      // tmp_z = old_x; old_z = z; z = tmp_z;
-      // tmp_mass = old_mass; old_mass = mass; mass = tmp_mass;
-    for (i=0; i<num; i++) {
-      old_x[i] = x[i];
-      old_y[i] = y[i];
-      old_z[i] = z[i];
-      old_mass[i] = mass[i];
+    // LOOP1: take snapshot to use on RHS when looping for updates
+    // memcpy at 512-bit granularity
+    for (i=0; i<num; i += 8) {
+        // Set i_writeback back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
+        __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+        __mmask8 i_writeback = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
+
+        _mm512_mask_store_pd(old_x + i, i_writeback, _mm512_load_pd(x + i));
+        _mm512_mask_store_pd(old_y + i, i_writeback, _mm512_load_pd(y + i));
+        _mm512_mask_store_pd(old_z + i, i_writeback, _mm512_load_pd(z + i));
+        _mm512_mask_store_pd(old_mass + i, i_writeback, _mm512_load_pd(mass + i));
     }
 
       // LOOP2: update position etc per particle (based on old data)
@@ -182,15 +178,12 @@ int main(int argc, char* argv[]) {
         __m512d vec_loss_rate = _mm512_load_pd(loss_rate + i);
         __m512d vec_liquid = _mm512_load_pd(liquid + i);
 
-        // Use masks to cover edge cases, e.g. i>num, i==j, etc.
+        // Set i_writeback back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
         __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
-
-        // Set i_writeback back for element i, if i<num.
-        __mmask8 i_writeback = _mm512_cmp_epi64_mask(vec_i, vec_num, 1); // 1: OP := _MM_CMPINT_LT
+        __mmask8 i_writeback = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
 
         // calc forces on body i due to particles (j != i)
         for (j=0; j<num; j += 1) {
-
           // if (i == j), then  don't set j writeback bit.
           __m512i vec_j = _mm512_set1_epi64(j);
           __mmask8 j_writeback = _mm512_cmp_epi64_mask(vec_i, vec_j, 4); // 4: OP := _MM_CMPINT_NE
@@ -210,7 +203,7 @@ int main(int argc, char* argv[]) {
           __m512d vec_temp_d = _mm512_fmadd_pd(vec_dz, vec_dz,
                                                _mm512_fmadd_pd(vec_dy, vec_dy,
                                                _mm512_mul_pd(vec_dx, vec_dx)));
-          __m512d vec_d = _mm512_max_pd(vec_temp_d, vec_min_d);
+          __m512d vec_d = _mm512_max_pd(vec_temp_d, _mm512_set1_pd(0.0001));
 
           // vec_F = vec_GRAVCONST * vec_old_mass / (vec_d * vec_d);
           // Note: mass is not factored in, since when calculating ax, ay, az we do F/mass.
@@ -237,7 +230,7 @@ int main(int argc, char* argv[]) {
 
         // temp-dependent condensation from gas to liquid
         vec_gas = _mm512_mul_pd(vec_gas, _mm512_mul_pd(vec_loss_rate, vec_tKExpNegative));
-        vec_liquid = _mm512_sub_pd(vec_one, vec_gas);
+        vec_liquid = _mm512_sub_pd(_mm512_set1_pd(1.0), vec_gas);
         vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
                                    _mm512_mul_pd(vec_liquid, vec_liquid_mass));
         // Store gas, liquid and mass
@@ -292,7 +285,7 @@ int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, 
   // create all random numbers
   int numToCreate = num*8;
   double *ranvec;
-  ranvec = (double *) malloc(numToCreate * sizeof(double));
+  ranvec = (double *) aligned_alloc(64, numToCreate * sizeof(double));
   if (ranvec == NULL) {
     printf("\n ERROR in malloc ranvec within init()\n");
     return -99;
@@ -335,7 +328,7 @@ int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, 
 //   // create all random numbers
 //   int numToCreate = num * 8;
 //   double *ranvec;
-//   ranvec = (double *) malloc(numToCreate * sizeof(double));
+//   ranvec = (double *) aligned_alloc(64, numToCreate * sizeof(double));
 //   if (ranvec == NULL) {
 //     printf("\n ERROR in malloc ranvec within init()\n");
 //     return -99;
