@@ -160,13 +160,14 @@ int main(int argc, char* argv[]) {
 
 
   // time=0 was initial conditions
-  // #pragma omp parallel default(none) private(time, i, j) \
-  //                                    shared(timesteps, tmp_x, tmp_y, tmp_z, tmp_mass)
+  // #pragma omp parallel private(time, i, j)
   {
     for (time=1; time<=timesteps; time++) {
 
       // LOOP1: take snapshot to use on RHS when looping for updates
       // memcpy at 512-bit granularity
+  // #pragma omp parallel for default(none) private(i) shared(old_x, old_z, old_y, old_mass, \
+                                            // x, y, z, mass, num) schedule(static, 1)
       for (i=0; i<num; i += 8) {
           // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
           __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
@@ -281,6 +282,7 @@ int main(int argc, char* argv[]) {
       __m512i vec_i = _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7);
       __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
       __m512d vec_totalMass = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass);
+      // #pragma omp for schedule(static, 1)
       for (i=8; i<num; i += 8) {
         vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
         i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
@@ -306,39 +308,63 @@ int main(int argc, char* argv[]) {
 
 } // main
 
+// init() will return 0 only if successful
 int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, double *vz, double *gas, double* liquid, double* loss_rate, int num) {
   // random numbers to set initial conditions - do not parallelise or amend order of random number usage
   int i;
-  double comp;
   double min_pos = -50.0, mult = +100.0, maxVel = +10.0;
   double recip = 1.0 / (double)RAND_MAX;
 
   // create all random numbers
-  int numToCreate = num*8;
+  int numToCreate = num * 8;
   double *ranvec;
   ranvec = (double *) malloc(numToCreate * sizeof(double));
   if (ranvec == NULL) {
     printf("\n ERROR in malloc ranvec within init()\n");
     return -99;
   }
+
+  // Don't change order
   for (i=0; i<numToCreate; i++) {
     ranvec[i] = (double) rand();
   }
 
-  // requirement to access ranvec in same order as if we had just used rand()
+  // Pull invariants and common subexpressions out of the for loop.
+  // Since we're using -O0, the compiler won't do these for us.
+  double recipDivBy2 = recip/2.0;
+  double recipDivBy25 = recip/25.0;
+  double multTimesRecip = mult * recip;
+  double maxVelTimes2 = 2.0*maxVel;
+  double maxVelTimes2TimesRecip = maxVelTimes2 * recip;
+
+  // Each thread accesses the half-open range of [i : i+8) within ranvec.
+  // We can use a chunk size of 8 with the schedule static.
+  #pragma omp parallel for default(none) private(i) \
+                                         shared(ranvec, num, min_pos, recipDivBy2, recipDivBy25, \
+                                                multTimesRecip, maxVelTimes2, \
+                                                maxVelTimes2TimesRecip, maxVel, x, y, z, vx, \
+                                                vy, vz, loss_rate, gas, liquid) \
+                                         schedule(static, 8)
   for (i=0; i<num; i++) {
-    x[i] = min_pos + mult*ranvec[8*i+0] * recip;
-    y[i] = min_pos + mult*ranvec[8*i+1] * recip;
-    z[i] = 0.0 + mult*ranvec[8*i+2] * recip;
-    vx[i] = -maxVel + 2.0*maxVel*ranvec[8*i+3] * recip;
-    vy[i] = -maxVel + 2.0*maxVel*ranvec[8*i+4] * recip;
-    vz[i] = -maxVel + 2.0*maxVel*ranvec[8*i+5] * recip;
-    // proportion of aerosol that evaporates
-    comp = .5 + ranvec[8*i+6]*recip/2.0;
-    loss_rate[i] = 1.0 - ranvec[8*i+7]*recip/25.0;
-    // aerosol is component of gas and (1-comp) of liquid
-    gas[i] = comp;
-    liquid[i] = (1.0-comp);
+  {
+      double *thisRanvec = ranvec + (i << 3); // i*8
+
+      x[i] = min_pos + thisRanvec[0] * multTimesRecip;
+      y[i] = min_pos + thisRanvec[1] * multTimesRecip;
+      z[i] = thisRanvec[2] * multTimesRecip;
+
+      vx[i] = -maxVel + thisRanvec[3] * maxVelTimes2TimesRecip;
+      vy[i] = -maxVel + thisRanvec[4] * maxVelTimes2TimesRecip;
+      vz[i] = -maxVel + thisRanvec[5] * maxVelTimes2TimesRecip;
+
+      // proportion of aerosol that evaporates
+      loss_rate[i] = 1.0 - thisRanvec[7] * recipDivBy25;
+      // aerosol is component of gas and (1-comp) of liquid
+      gas[i] = .5 + thisRanvec[6] * recipDivBy2;
+      liquid[i] = (1.0 - gas[i]);
+    }
+
+    /// Threads join here.
   }
 
   // release temp memory for ranvec which is no longer required
@@ -348,73 +374,6 @@ int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, 
 } // init
 
 
-
-// // init() will return 0 only if successful
-// int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, double *vz, double *gas, double* liquid, double* loss_rate, int num) {
-//   // random numbers to set initial conditions - do not parallelise or amend order of random number usage
-//   int i;
-//   double min_pos = -50.0, mult = +100.0, maxVel = +10.0;
-//   double recip = 1.0 / (double)RAND_MAX;
-
-//   // create all random numbers
-//   int numToCreate = num * 8;
-//   double *ranvec;
-//   ranvec = (double *) malloc(numToCreate * sizeof(double));
-//   if (ranvec == NULL) {
-//     printf("\n ERROR in malloc ranvec within init()\n");
-//     return -99;
-//   }
-
-//   // Don't change order
-//   for (i=0; i<numToCreate; i++) {
-//     ranvec[i] = (double) rand();
-//   }
-
-//   // Pull invariants and common subexpressions out of the for loop.
-//   // Since we're using -O0, the compiler won't do these for us.
-//   double recipDivBy2 = recip/2.0;
-//   double recipDivBy25 = recip/25.0;
-//   double multTimesRecip = mult * recip;
-//   double maxVelTimes2 = 2.0*maxVel;
-//   double maxVelTimes2TimesRecip = maxVelTimes2 * recip;
-
-//   // Each thread accesses the half-open range of [i : i+8) within ranvec.
-//   // We can use a chunk size of 8 with the schedule static.
-//   #pragma omp parallel for default(none) private(i) \
-//                                          shared(ranvec, num, min_pos, recipDivBy2, recipDivBy25, \
-//                                                 multTimesRecip, maxVelTimes2, \
-//                                                 maxVelTimes2TimesRecip, maxVel, x, y, z, vx, \
-//                                                 vy, vz, loss_rate, gas, liquid) \
-//                                          schedule(static, 8)
-//   for (i=0; i<num; i++) {
-//   {
-//       double *thisRanvec = ranvec + (i << 3); // i*8
-
-//       x[i] = min_pos + thisRanvec[0] * multTimesRecip;
-//       y[i] = min_pos + thisRanvec[1] * multTimesRecip;
-//       z[i] = thisRanvec[2] * multTimesRecip;
-
-//       vx[i] = -maxVel + thisRanvec[3] * maxVelTimes2TimesRecip;
-//       vy[i] = -maxVel + thisRanvec[4] * maxVelTimes2TimesRecip;
-//       vz[i] = -maxVel + thisRanvec[5] * maxVelTimes2TimesRecip;
-
-//       // proportion of aerosol that evaporates
-//       loss_rate[i] = 1.0 - thisRanvec[7] * recipDivBy25;
-//       // aerosol is component of gas and (1-comp) of liquid
-//       gas[i] = .5 + thisRanvec[6] * recipDivBy2;
-//       liquid[i] = (1.0 - gas[i]);
-//     }
-
-//     /// Threads join here.
-//   }
-
-//   // release temp memory for ranvec which is no longer required
-//   free(ranvec);
-
-//   return 0;
-// } // init
-
-
 double calc_system_energy(double mass, double *vx, double *vy, double *vz, int num) {
   /*
      energy is sum of 0.5*mass*velocity^2
@@ -422,10 +381,22 @@ double calc_system_energy(double mass, double *vx, double *vy, double *vz, int n
   */
   int i;
   double totalEnergy = 0.0, systemEnergy;
+  __m512d vec_totalEnergy = _mm512_set1_pd(0.0);
   for (i=0; i<num; i++) {
-    totalEnergy += vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i];
+    // Load mass elements if i<num, else set to 0.
+    __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+    __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1); // OP: 1 is LT
+    __m512d vec_vx = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vx + i);
+    __m512d vec_vy = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vy + i);
+    __m512d vec_vz = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vz + i);
+    // The expression "d += a*a + b*b + c*c" can be done using 3 fma ops:
+    //  fma(a, a, fma(b, b, fma(c, c, d))
+    __m512d vec_totalEnergy = _mm512_fmadd_pd(vec_vz, vec_vz,
+                                        _mm512_fmadd_pd(vec_vy, vec_vy,
+                                        _mm512_fmadd_pd(vec_vx, vec_vx, vec_totalEnergy)));
   }
-  totalEnergy = 0.5 * mass * totalEnergy;
+
+  totalEnergy = _mm512_reduce_add_pd(vec_totalEnergy) * 0.5 * mass;
   systemEnergy = totalEnergy / (double) num;
   return systemEnergy;
 }
