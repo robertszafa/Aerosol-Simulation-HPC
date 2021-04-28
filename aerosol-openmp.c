@@ -137,18 +137,13 @@ int main(int argc, char* argv[]) {
 
 
   // Expand constants into AVX-512 form.
-  double tKExpNegative = exp(-k*T);
-  __m512d vec_tKExpNegative = _mm512_set_pd(tKExpNegative, tKExpNegative, tKExpNegative, tKExpNegative,
-                                            tKExpNegative, tKExpNegative, tKExpNegative, tKExpNegative);
-  __m512d vec_GRAVCONST = _mm512_set_pd(GRAVCONST, GRAVCONST, GRAVCONST, GRAVCONST,
-                                        GRAVCONST, GRAVCONST, GRAVCONST, GRAVCONST);
-  __m512d vec_gas_mass = _mm512_set_pd(gas_mass, gas_mass, gas_mass, gas_mass,
-                                       gas_mass, gas_mass, gas_mass, gas_mass);
-  __m512d vec_liquid_mass = _mm512_set_pd(liquid_mass, liquid_mass, liquid_mass, liquid_mass,
-                                          liquid_mass, liquid_mass, liquid_mass, liquid_mass);
-  __m512d vec_min_d = _mm512_set_pd(0.0001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001);
-  __m512d vec_one = _mm512_set_pd(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
-  __m512i vec_num = _mm512_set_epi64(num, num, num, num, num, num, num, num);
+  __m512d vec_tKExpNegative = _mm512_set1_pd(exp(-k*T));
+  __m512d vec_GRAVCONST = _mm512_set1_pd(GRAVCONST);
+  __m512d vec_gas_mass = _mm512_set1_pd(gas_mass);
+  __m512d vec_liquid_mass = _mm512_set1_pd(liquid_mass);
+  __m512d vec_min_d = _mm512_set1_pd(0.001);
+  __m512d vec_one = _mm512_set1_pd(1.0);
+  __m512i vec_num = _mm512_set1_epi64(num);
 
 
   // time=0 was initial conditions
@@ -189,29 +184,22 @@ int main(int argc, char* argv[]) {
 
         // Use masks to cover edge cases, e.g. i>num, i==j, etc.
         __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
-        // i_writeback = (i<num) ? 1 : 0
-        // __mmask8 i_writeback = _mm512_cmp_epi64_mask(vec_i, vec_num, 1); // 1: OP := _MM_CMPINT_LT
+
+        // Set i_writeback back for element i, if i<num.
+        __mmask8 i_writeback = _mm512_cmp_epi64_mask(vec_i, vec_num, 1); // 1: OP := _MM_CMPINT_LT
 
         // calc forces on body i due to particles (j != i)
         for (j=0; j<num; j += 1) {
-          // if (j == i) continue;
 
-          // if (i == j) or (j > num), don't set j writeback bit.
-          // __m512i vec_j = _mm512_set_epi64(j, j+1, j+2, j+3, j+4, j+5, j+6, j+7);
-          __m512i vec_j = _mm512_set_epi64(j, j, j, j, j, j, j, j);
-          // __mmask8 is_i_eq_j = _mm512_cmp_epi64_mask(vec_i, vec_j, 4); // 4: OP := _MM_CMPINT_NE
-          // __mmask8 j_writeback = _mm512_mask_cmp_epi64_mask(is_i_eq_j, vec_j, vec_num, 1); // 1: LT
-          __mmask8 j_writeback = _mm512_cmp_epi64_mask(vec_i, vec_j, 4);
+          // if (i == j), then  don't set j writeback bit.
+          __m512i vec_j = _mm512_set1_epi64(j);
+          __mmask8 j_writeback = _mm512_cmp_epi64_mask(vec_i, vec_j, 4); // 4: OP := _MM_CMPINT_NE
 
           // Load into AVX-512 registers.
-          vec_old_x = _mm512_set_pd(old_x[j], old_x[j], old_x[j], old_x[j], old_x[j], old_x[j], old_x[j], old_x[j]);
-          vec_old_y = _mm512_set_pd(old_y[j], old_y[j], old_y[j], old_y[j], old_y[j], old_y[j], old_y[j], old_y[j]);
-          vec_old_z = _mm512_set_pd(old_z[j], old_z[j], old_z[j], old_z[j], old_z[j], old_z[j], old_z[j], old_z[j]);
-          vec_old_mass = _mm512_set_pd(old_mass[j], old_mass[j], old_mass[j], old_mass[j], old_mass[j], old_mass[j], old_mass[j], old_mass[j]);
-          // vec_old_x = _mm512_load_pd(old_x + j);
-          // vec_old_y = _mm512_load_pd(old_y + j);
-          // vec_old_z = _mm512_load_pd(old_z + j);
-          // vec_old_mass = _mm512_load_pd(old_mass + j);
+          vec_old_x = _mm512_set1_pd(old_x[j]);
+          vec_old_y = _mm512_set1_pd(old_y[j]);
+          vec_old_z = _mm512_set1_pd(old_z[j]);
+          vec_old_mass = _mm512_set1_pd(old_mass[j]);
 
           __m512d vec_dx = _mm512_sub_pd(vec_old_x, vec_x);
           __m512d vec_dy = _mm512_sub_pd(vec_old_y, vec_y);
@@ -235,67 +223,40 @@ int main(int argc, char* argv[]) {
           vec_vy = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dy, vec_d), vec_vy, j_writeback);
           vec_vz = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dz, vec_d), vec_vz, j_writeback);
         }
-        _mm512_store_pd(vx + i, vec_vx);
-        _mm512_store_pd(vy + i, vec_vy);
-        _mm512_store_pd(vz + i, vec_vz);
 
-      int tmpI = i;
-      for(; i<tmpI+8; i++) {
-  // calc new position
-        x[i] = old_x[i] + vx[i];
-        y[i] = old_y[i] + vy[i];
-        z[i] = old_z[i] + vz[i];
-        // temp-dependent condensation from gas to liquid
-        gas[i] *= loss_rate[i] * exp(-k*T);
-        liquid[i] = 1.0 - gas[i];
-        mass[i] = gas[i]*gas_mass + liquid[i]*liquid_mass;
-        // conserve energy means 0.5*m*v*v remains constant
-        double v_squared = vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i];
-        double factor = sqrt(old_mass[i]*v_squared/mass[i])/sqrt(v_squared);
-        vx[i] *= factor;
-        vy[i] *= factor;
-        vz[i] *= factor;
-      }
-      i = tmpI;
+        vec_old_x = _mm512_load_pd(old_x + i);
+        vec_old_y = _mm512_load_pd(old_y + i);
+        vec_old_z = _mm512_load_pd(old_z + i);
+        vec_old_mass = _mm512_load_pd(old_mass + i);
 
-        // calc new position & store back to mem.
+        // calc new position
         // Note: elements where i>num, are not written back thanks to using a mask.
-        // vec_old_x = _mm512_load_pd(old_x + i);
-        // vec_old_y = _mm512_load_pd(old_y + i);
-        // vec_old_z = _mm512_load_pd(old_z + i);
-        // vec_x = _mm512_add_pd(vec_old_x, vec_vx); _mm512_mask_store_pd(x + i, i_writeback, vec_x);
-        // vec_y = _mm512_add_pd(vec_old_y, vec_vy); _mm512_mask_store_pd(y + i, i_writeback, vec_y);
-        // vec_z = _mm512_add_pd(vec_old_z, vec_vz); _mm512_mask_store_pd(z + i, i_writeback, vec_z);
+        vec_x = _mm512_add_pd(vec_old_x, vec_vx); _mm512_mask_store_pd(x + i, i_writeback, vec_x);
+        vec_y = _mm512_add_pd(vec_old_y, vec_vy); _mm512_mask_store_pd(y + i, i_writeback, vec_y);
+        vec_z = _mm512_add_pd(vec_old_z, vec_vz); _mm512_mask_store_pd(z + i, i_writeback, vec_z);
 
-        // // temp-dependent condensation from gas to liquid
-        // vec_gas = _mm512_mul_pd(vec_gas, _mm512_mul_pd(vec_loss_rate, vec_tKExpNegative));
-        // vec_liquid = _mm512_sub_pd(vec_one, vec_gas);
-        // vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
-        //                            _mm512_mul_pd(vec_liquid, vec_liquid_mass));
+        // temp-dependent condensation from gas to liquid
+        vec_gas = _mm512_mul_pd(vec_gas, _mm512_mul_pd(vec_loss_rate, vec_tKExpNegative));
+        vec_liquid = _mm512_sub_pd(vec_one, vec_gas);
+        vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
+                                   _mm512_mul_pd(vec_liquid, vec_liquid_mass));
+        // Store gas, liquid and mass
+        _mm512_mask_store_pd(gas + i, i_writeback, vec_gas);
+        _mm512_mask_store_pd(liquid + i, i_writeback, vec_liquid);
+        _mm512_mask_store_pd(mass + i, i_writeback, vec_mass);
 
-        // // Store gas, liquid and mass
-        // _mm512_mask_store_pd(gas + i, i_writeback, vec_gas);
-        // _mm512_mask_store_pd(liquid + i, i_writeback, vec_liquid);
-        // _mm512_mask_store_pd(mass + i, i_writeback, vec_mass);
+        // "sqrt(old_mass * v_squared / mass) / sqrt(v_squared)"" can be simpliefied to:
+        // "sqrt(old_mass / mass)", if numbers rooted are >0 (guranteed for mass & velocities).
+        __m512d factor = _mm512_sqrt_pd(_mm512_div_pd(vec_old_mass, vec_mass));
 
-        // // conserve energy means 0.5*m*v*v remains constant
-        // // v_squared = vx*vx + vy*vy + vz*vz
-        // __m512d vec_v_squared = _mm512_fmadd_pd(vec_vz, vec_vz,
-        //                                         _mm512_fmadd_pd(vec_vy, vec_vy,
-        //                                                         _mm512_mul_pd(vec_vx, vec_vx)));
-        // // TODO: (sqrt(a) / sqrt(b)) == sqrt(a / b), if a, b > 0
-        // __m512d factor = _mm512_div_pd(_mm512_sqrt_pd(_mm512_div_pd(_mm512_mul_pd(vec_old_mass,
-        //                                                                           vec_v_squared),
-        //                                                             vec_mass)),
-        //                                _mm512_sqrt_pd(vec_v_squared));
-        // vec_vx = _mm512_mul_pd(factor, vec_vx);
-        // vec_vy = _mm512_mul_pd(factor, vec_vy);
-        // vec_vz = _mm512_mul_pd(factor, vec_vz);
+        vec_vx = _mm512_mul_pd(factor, vec_vx);
+        vec_vy = _mm512_mul_pd(factor, vec_vy);
+        vec_vz = _mm512_mul_pd(factor, vec_vz);
 
-        // // Store vx, vy, vz
-        // _mm512_mask_store_pd(vx + i, i_writeback, vec_vx);
-        // _mm512_mask_store_pd(vy + i, i_writeback, vec_vy);
-        // _mm512_mask_store_pd(vz + i, i_writeback, vec_vz);
+        // Store vx, vy, vz
+        _mm512_mask_store_pd(vx + i, i_writeback, vec_vx);
+        _mm512_mask_store_pd(vy + i, i_writeback, vec_vy);
+        _mm512_mask_store_pd(vz + i, i_writeback, vec_vz);
 
       } // end of LOOP 2
 
