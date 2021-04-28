@@ -23,6 +23,13 @@
 #include <immintrin.h>
 
 
+void print_mask(__mmask8 var)
+{
+    int8_t val;
+    memcpy(&val, &var, sizeof(val));
+    printf("Numerical: %i \n", val);
+}
+
 double liquid_mass=2.0, gas_mass=0.3, k=0.00001;
 
 int init(double*, double*, double*, double*, double*, double*, double*, double*, double*, double*, int);
@@ -129,9 +136,6 @@ int main(int argc, char* argv[]) {
   printf("Now to integrate for %d timesteps\n", timesteps);
 
 
-  // For swapping poniters.
-  double *tmp_x, *tmp_y, *tmp_z, *tmp_mass;
-
   // Expand constants into AVX-512 form.
   double tKExpNegative = exp(-k*T);
   __m512d vec_tKExpNegative = _mm512_set_pd(tKExpNegative, tKExpNegative, tKExpNegative, tKExpNegative,
@@ -142,7 +146,7 @@ int main(int argc, char* argv[]) {
                                        gas_mass, gas_mass, gas_mass, gas_mass);
   __m512d vec_liquid_mass = _mm512_set_pd(liquid_mass, liquid_mass, liquid_mass, liquid_mass,
                                           liquid_mass, liquid_mass, liquid_mass, liquid_mass);
-  __m512d vec_min_d = _mm512_set_pd(0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01);
+  __m512d vec_min_d = _mm512_set_pd(0.0001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001);
   __m512d vec_one = _mm512_set_pd(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
   __m512i vec_num = _mm512_set_epi64(num, num, num, num, num, num, num, num);
 
@@ -154,10 +158,17 @@ int main(int argc, char* argv[]) {
     for (time=1; time<=timesteps; time++) {
 
       // Swap pointers insted of moving data.
-      tmp_x = x; old_x = x; x = tmp_x;
-      tmp_y = x; old_y = y; y = tmp_y;
-      tmp_z = z; old_z = z; z = tmp_z;
-      tmp_mass = mass; old_mass = mass; mass = tmp_mass;
+      // double *tmp_x, *tmp_y, *tmp_z, *tmp_mass;
+      // tmp_x = old_x; old_x = x; x = tmp_x;
+      // tmp_y = old_x; old_y = y; y = tmp_y;
+      // tmp_z = old_x; old_z = z; z = tmp_z;
+      // tmp_mass = old_mass; old_mass = mass; mass = tmp_mass;
+    for (i=0; i<num; i++) {
+      old_x[i] = x[i];
+      old_y[i] = y[i];
+      old_z[i] = z[i];
+      old_mass[i] = mass[i];
+    }
 
       // LOOP2: update position etc per particle (based on old data)
       // #pragma omp for schedule(static, 1)
@@ -179,21 +190,28 @@ int main(int argc, char* argv[]) {
         // Use masks to cover edge cases, e.g. i>num, i==j, etc.
         __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
         // i_writeback = (i<num) ? 1 : 0
-        __mmask8 i_writeback = _mm512_cmp_epi64_mask(vec_i, vec_num, 1); // 1: OP := _MM_CMPINT_LT
+        // __mmask8 i_writeback = _mm512_cmp_epi64_mask(vec_i, vec_num, 1); // 1: OP := _MM_CMPINT_LT
 
         // calc forces on body i due to particles (j != i)
-        for (j=0; j<num; j += 8) {
+        for (j=0; j<num; j += 1) {
+          // if (j == i) continue;
 
           // if (i == j) or (j > num), don't set j writeback bit.
-          __m512i vec_j = _mm512_set_epi64(j, j+1, j+2, j+3, j+4, j+5, j+6, j+7);
-          __mmask8 is_i_eq_j = _mm512_cmp_epi64_mask(vec_i, vec_j, 4); // 4: OP := _MM_CMPINT_NE
-          __mmask8 j_writeback = _mm512_mask_cmp_epi64_mask(is_i_eq_j, vec_j, vec_num, 1); // 1: LT
+          // __m512i vec_j = _mm512_set_epi64(j, j+1, j+2, j+3, j+4, j+5, j+6, j+7);
+          __m512i vec_j = _mm512_set_epi64(j, j, j, j, j, j, j, j);
+          // __mmask8 is_i_eq_j = _mm512_cmp_epi64_mask(vec_i, vec_j, 4); // 4: OP := _MM_CMPINT_NE
+          // __mmask8 j_writeback = _mm512_mask_cmp_epi64_mask(is_i_eq_j, vec_j, vec_num, 1); // 1: LT
+          __mmask8 j_writeback = _mm512_cmp_epi64_mask(vec_i, vec_j, 4);
 
           // Load into AVX-512 registers.
-          vec_old_x = _mm512_load_pd(old_x + j);
-          vec_old_y = _mm512_load_pd(old_y + j);
-          vec_old_z = _mm512_load_pd(old_z + j);
-          vec_old_mass = _mm512_load_pd(old_mass + j);
+          vec_old_x = _mm512_set_pd(old_x[j], old_x[j], old_x[j], old_x[j], old_x[j], old_x[j], old_x[j], old_x[j]);
+          vec_old_y = _mm512_set_pd(old_y[j], old_y[j], old_y[j], old_y[j], old_y[j], old_y[j], old_y[j], old_y[j]);
+          vec_old_z = _mm512_set_pd(old_z[j], old_z[j], old_z[j], old_z[j], old_z[j], old_z[j], old_z[j], old_z[j]);
+          vec_old_mass = _mm512_set_pd(old_mass[j], old_mass[j], old_mass[j], old_mass[j], old_mass[j], old_mass[j], old_mass[j], old_mass[j]);
+          // vec_old_x = _mm512_load_pd(old_x + j);
+          // vec_old_y = _mm512_load_pd(old_y + j);
+          // vec_old_z = _mm512_load_pd(old_z + j);
+          // vec_old_mass = _mm512_load_pd(old_mass + j);
 
           __m512d vec_dx = _mm512_sub_pd(vec_old_x, vec_x);
           __m512d vec_dy = _mm512_sub_pd(vec_old_y, vec_y);
@@ -201,16 +219,14 @@ int main(int argc, char* argv[]) {
 
           // The expression "a*a + b*b + c*c" can be done using 1 mul and 2 fma ops:
           //  fma(a, a, fma(b, b, mul(c, c))
-          __m512d vec_temp_d = _mm512_sqrt_pd(_mm512_fmadd_pd(vec_dz, vec_dz,
-                                              _mm512_fmadd_pd(vec_dy, vec_dy,
-                                              _mm512_mul_pd(vec_dx, vec_dx))));
-
-          __m512d vec_d = _mm512_min_pd(vec_temp_d, vec_min_d);
+          __m512d vec_temp_d = _mm512_fmadd_pd(vec_dz, vec_dz,
+                                               _mm512_fmadd_pd(vec_dy, vec_dy,
+                                               _mm512_mul_pd(vec_dx, vec_dx)));
+          __m512d vec_d = _mm512_max_pd(vec_temp_d, vec_min_d);
 
           // vec_F = vec_GRAVCONST * vec_old_mass / (vec_d * vec_d);
           // Note: mass is not factored in, since when calculating ax, ay, az we do F/mass.
-          __m512d vec_F = _mm512_div_pd(_mm512_mul_pd(vec_GRAVCONST, vec_old_mass),
-                                        _mm512_mul_pd(vec_d, vec_d));
+          __m512d vec_F = _mm512_div_pd(_mm512_mul_pd(vec_GRAVCONST, vec_old_mass), vec_d);
 
           // calculate acceleration due to the force, F and add to velocities
           // (approximate velocities in "unit time")
@@ -219,42 +235,67 @@ int main(int argc, char* argv[]) {
           vec_vy = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dy, vec_d), vec_vy, j_writeback);
           vec_vz = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dz, vec_d), vec_vz, j_writeback);
         }
+        _mm512_store_pd(vx + i, vec_vx);
+        _mm512_store_pd(vy + i, vec_vy);
+        _mm512_store_pd(vz + i, vec_vz);
+
+      int tmpI = i;
+      for(; i<tmpI+8; i++) {
+  // calc new position
+        x[i] = old_x[i] + vx[i];
+        y[i] = old_y[i] + vy[i];
+        z[i] = old_z[i] + vz[i];
+        // temp-dependent condensation from gas to liquid
+        gas[i] *= loss_rate[i] * exp(-k*T);
+        liquid[i] = 1.0 - gas[i];
+        mass[i] = gas[i]*gas_mass + liquid[i]*liquid_mass;
+        // conserve energy means 0.5*m*v*v remains constant
+        double v_squared = vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i];
+        double factor = sqrt(old_mass[i]*v_squared/mass[i])/sqrt(v_squared);
+        vx[i] *= factor;
+        vy[i] *= factor;
+        vz[i] *= factor;
+      }
+      i = tmpI;
 
         // calc new position & store back to mem.
         // Note: elements where i>num, are not written back thanks to using a mask.
-        vec_x = _mm512_add_pd(vec_old_x, vec_vx); _mm512_mask_store_pd(x + i, i_writeback, vec_x);
-        vec_y = _mm512_add_pd(vec_old_y, vec_vy); _mm512_mask_store_pd(y + i, i_writeback, vec_y);
-        vec_z = _mm512_add_pd(vec_old_z, vec_vz); _mm512_mask_store_pd(z + i, i_writeback, vec_z);
+        // vec_old_x = _mm512_load_pd(old_x + i);
+        // vec_old_y = _mm512_load_pd(old_y + i);
+        // vec_old_z = _mm512_load_pd(old_z + i);
+        // vec_x = _mm512_add_pd(vec_old_x, vec_vx); _mm512_mask_store_pd(x + i, i_writeback, vec_x);
+        // vec_y = _mm512_add_pd(vec_old_y, vec_vy); _mm512_mask_store_pd(y + i, i_writeback, vec_y);
+        // vec_z = _mm512_add_pd(vec_old_z, vec_vz); _mm512_mask_store_pd(z + i, i_writeback, vec_z);
 
-        // temp-dependent condensation from gas to liquid
-        vec_gas = _mm512_mul_pd(vec_gas, _mm512_mul_pd(vec_loss_rate, vec_tKExpNegative));
-        vec_liquid = _mm512_add_pd(vec_one, vec_gas);
-        vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
-                                   _mm512_mul_pd(vec_liquid, vec_liquid_mass));
+        // // temp-dependent condensation from gas to liquid
+        // vec_gas = _mm512_mul_pd(vec_gas, _mm512_mul_pd(vec_loss_rate, vec_tKExpNegative));
+        // vec_liquid = _mm512_sub_pd(vec_one, vec_gas);
+        // vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
+        //                            _mm512_mul_pd(vec_liquid, vec_liquid_mass));
 
-        // Store gas, liquid and mass
-        _mm512_mask_store_pd(gas + i, i_writeback, vec_gas);
-        _mm512_mask_store_pd(liquid + i, i_writeback, vec_liquid);
-        _mm512_mask_store_pd(mass + i, i_writeback, vec_mass);
+        // // Store gas, liquid and mass
+        // _mm512_mask_store_pd(gas + i, i_writeback, vec_gas);
+        // _mm512_mask_store_pd(liquid + i, i_writeback, vec_liquid);
+        // _mm512_mask_store_pd(mass + i, i_writeback, vec_mass);
 
-        // conserve energy means 0.5*m*v*v remains constant
-        // v_squared = vx*vx + vy*vy + vz*vz
-        __m512d vec_v_squared = _mm512_fmadd_pd(vec_vz, vec_vz,
-                                                _mm512_fmadd_pd(vec_vy, vec_vy,
+        // // conserve energy means 0.5*m*v*v remains constant
+        // // v_squared = vx*vx + vy*vy + vz*vz
+        // __m512d vec_v_squared = _mm512_fmadd_pd(vec_vz, vec_vz,
+        //                                         _mm512_fmadd_pd(vec_vy, vec_vy,
+        //                                                         _mm512_mul_pd(vec_vx, vec_vx)));
+        // // TODO: (sqrt(a) / sqrt(b)) == sqrt(a / b), if a, b > 0
+        // __m512d factor = _mm512_div_pd(_mm512_sqrt_pd(_mm512_div_pd(_mm512_mul_pd(vec_old_mass,
+        //                                                                           vec_v_squared),
+        //                                                             vec_mass)),
+        //                                _mm512_sqrt_pd(vec_v_squared));
+        // vec_vx = _mm512_mul_pd(factor, vec_vx);
+        // vec_vy = _mm512_mul_pd(factor, vec_vy);
+        // vec_vz = _mm512_mul_pd(factor, vec_vz);
 
-                                                                _mm512_mul_pd(vec_vx, vec_vx)));
-        __m512d factor = _mm512_div_pd(_mm512_sqrt_pd(_mm512_div_pd(_mm512_mul_pd(vec_old_mass,
-                                                                                  vec_v_squared),
-                                                                    vec_mass)),
-                                       _mm512_sqrt_pd(vec_v_squared));
-        vec_vx = _mm512_mul_pd(factor, vec_vx);
-        vec_vy = _mm512_mul_pd(factor, vec_vy);
-        vec_vz = _mm512_mul_pd(factor, vec_vz);
-
-        // Store vx, vy, vz
-        _mm512_mask_store_pd(vx + i, i_writeback, vec_vx);
-        _mm512_mask_store_pd(vy + i, i_writeback, vec_vy);
-        _mm512_mask_store_pd(vz + i, i_writeback, vec_vz);
+        // // Store vx, vy, vz
+        // _mm512_mask_store_pd(vx + i, i_writeback, vec_vx);
+        // _mm512_mask_store_pd(vy + i, i_writeback, vec_vy);
+        // _mm512_mask_store_pd(vz + i, i_writeback, vec_vz);
 
       } // end of LOOP 2
 
@@ -280,64 +321,39 @@ int main(int argc, char* argv[]) {
 
 } // main
 
-
-// init() will return 0 only if successful
 int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, double *vz, double *gas, double* liquid, double* loss_rate, int num) {
   // random numbers to set initial conditions - do not parallelise or amend order of random number usage
   int i;
+  double comp;
   double min_pos = -50.0, mult = +100.0, maxVel = +10.0;
   double recip = 1.0 / (double)RAND_MAX;
 
   // create all random numbers
-  int numToCreate = num * 8;
+  int numToCreate = num*8;
   double *ranvec;
   ranvec = (double *) malloc(numToCreate * sizeof(double));
   if (ranvec == NULL) {
     printf("\n ERROR in malloc ranvec within init()\n");
     return -99;
   }
-
-  // Don't change order
   for (i=0; i<numToCreate; i++) {
     ranvec[i] = (double) rand();
   }
 
-  // Pull invariants and common subexpressions out of the for loop.
-  // Since we're using -O0, the compiler won't do these for us.
-  double recipDivBy2 = recip/2.0;
-  double recipDivBy25 = recip/25.0;
-  double multTimesRecip = mult * recip;
-  double maxVelTimes2 = 2.0*maxVel;
-  double maxVelTimes2TimesRecip = maxVelTimes2 * recip;
-
-  // Each thread accesses the half-open range of [i : i+8) within ranvec.
-  // We can use a chunk size of 8 with the schedule static.
-  #pragma omp parallel for default(none) private(i) \
-                                         shared(ranvec, num, min_pos, recipDivBy2, recipDivBy25, \
-                                                multTimesRecip, maxVelTimes2, \
-                                                maxVelTimes2TimesRecip, maxVel, x, y, z, vx, \
-                                                vy, vz, loss_rate, gas, liquid) \
-                                         schedule(static, 8)
+  // requirement to access ranvec in same order as if we had just used rand()
   for (i=0; i<num; i++) {
-  {
-      double *thisRanvec = ranvec + (i << 3); // i*8
-
-      x[i] = min_pos + thisRanvec[0] * multTimesRecip;
-      y[i] = min_pos + thisRanvec[1] * multTimesRecip;
-      z[i] = thisRanvec[2] * multTimesRecip;
-
-      vx[i] = -maxVel + thisRanvec[3] * maxVelTimes2TimesRecip;
-      vy[i] = -maxVel + thisRanvec[4] * maxVelTimes2TimesRecip;
-      vz[i] = -maxVel + thisRanvec[5] * maxVelTimes2TimesRecip;
-
-      // proportion of aerosol that evaporates
-      loss_rate[i] = 1.0 - thisRanvec[7] * recipDivBy25;
-      // aerosol is component of gas and (1-comp) of liquid
-      gas[i] = .5 + thisRanvec[6] * recipDivBy2;
-      liquid[i] = (1.0 - gas[i]);
-    }
-
-    /// Threads join here.
+    x[i] = min_pos + mult*ranvec[8*i+0] * recip;
+    y[i] = min_pos + mult*ranvec[8*i+1] * recip;
+    z[i] = 0.0 + mult*ranvec[8*i+2] * recip;
+    vx[i] = -maxVel + 2.0*maxVel*ranvec[8*i+3] * recip;
+    vy[i] = -maxVel + 2.0*maxVel*ranvec[8*i+4] * recip;
+    vz[i] = -maxVel + 2.0*maxVel*ranvec[8*i+5] * recip;
+    // proportion of aerosol that evaporates
+    comp = .5 + ranvec[8*i+6]*recip/2.0;
+    loss_rate[i] = 1.0 - ranvec[8*i+7]*recip/25.0;
+    // aerosol is component of gas and (1-comp) of liquid
+    gas[i] = comp;
+    liquid[i] = (1.0-comp);
   }
 
   // release temp memory for ranvec which is no longer required
@@ -345,6 +361,73 @@ int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, 
 
   return 0;
 } // init
+
+
+
+// // init() will return 0 only if successful
+// int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, double *vz, double *gas, double* liquid, double* loss_rate, int num) {
+//   // random numbers to set initial conditions - do not parallelise or amend order of random number usage
+//   int i;
+//   double min_pos = -50.0, mult = +100.0, maxVel = +10.0;
+//   double recip = 1.0 / (double)RAND_MAX;
+
+//   // create all random numbers
+//   int numToCreate = num * 8;
+//   double *ranvec;
+//   ranvec = (double *) malloc(numToCreate * sizeof(double));
+//   if (ranvec == NULL) {
+//     printf("\n ERROR in malloc ranvec within init()\n");
+//     return -99;
+//   }
+
+//   // Don't change order
+//   for (i=0; i<numToCreate; i++) {
+//     ranvec[i] = (double) rand();
+//   }
+
+//   // Pull invariants and common subexpressions out of the for loop.
+//   // Since we're using -O0, the compiler won't do these for us.
+//   double recipDivBy2 = recip/2.0;
+//   double recipDivBy25 = recip/25.0;
+//   double multTimesRecip = mult * recip;
+//   double maxVelTimes2 = 2.0*maxVel;
+//   double maxVelTimes2TimesRecip = maxVelTimes2 * recip;
+
+//   // Each thread accesses the half-open range of [i : i+8) within ranvec.
+//   // We can use a chunk size of 8 with the schedule static.
+//   #pragma omp parallel for default(none) private(i) \
+//                                          shared(ranvec, num, min_pos, recipDivBy2, recipDivBy25, \
+//                                                 multTimesRecip, maxVelTimes2, \
+//                                                 maxVelTimes2TimesRecip, maxVel, x, y, z, vx, \
+//                                                 vy, vz, loss_rate, gas, liquid) \
+//                                          schedule(static, 8)
+//   for (i=0; i<num; i++) {
+//   {
+//       double *thisRanvec = ranvec + (i << 3); // i*8
+
+//       x[i] = min_pos + thisRanvec[0] * multTimesRecip;
+//       y[i] = min_pos + thisRanvec[1] * multTimesRecip;
+//       z[i] = thisRanvec[2] * multTimesRecip;
+
+//       vx[i] = -maxVel + thisRanvec[3] * maxVelTimes2TimesRecip;
+//       vy[i] = -maxVel + thisRanvec[4] * maxVelTimes2TimesRecip;
+//       vz[i] = -maxVel + thisRanvec[5] * maxVelTimes2TimesRecip;
+
+//       // proportion of aerosol that evaporates
+//       loss_rate[i] = 1.0 - thisRanvec[7] * recipDivBy25;
+//       // aerosol is component of gas and (1-comp) of liquid
+//       gas[i] = .5 + thisRanvec[6] * recipDivBy2;
+//       liquid[i] = (1.0 - gas[i]);
+//     }
+
+//     /// Threads join here.
+//   }
+
+//   // release temp memory for ranvec which is no longer required
+//   free(ranvec);
+
+//   return 0;
+// } // init
 
 
 double calc_system_energy(double mass, double *vx, double *vy, double *vz, int num) {
