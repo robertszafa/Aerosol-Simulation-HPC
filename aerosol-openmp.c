@@ -160,8 +160,9 @@ int main(int argc, char* argv[]) {
     #pragma omp parallel default(none) \
                          private(i, j) \
                          shared(num, x, y, z, mass, old_x, old_z, old_y, old_mass, vx, vy, vz, gas,\
-                                loss_rate, liquid, totalMass, systemEnergy, T, vec_tKExpNegative, \
-                                vec_GRAVCONST, vec_gas_mass, vec_liquid_mass, vec_totalMass)
+                                loss_rate, liquid, totalMass, systemEnergy, T, time, vec_GRAVCONST, \
+                                vec_tKExpNegative, vec_GRAVCONST, vec_gas_mass, vec_liquid_mass, \
+                                vec_totalMass)
     {
       // LOOP1: take snapshot to use on RHS when looping for updates
       #pragma omp for schedule(static, 1)
@@ -292,7 +293,7 @@ int main(int argc, char* argv[]) {
         totalMass = _mm512_reduce_add_pd(vec_totalMass);
         systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
 
-        // printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n", time, T, systemEnergy, totalMass);
+        printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n", time, T, systemEnergy, totalMass);
         // temperature drops per timestep
         T *= 0.99999;
       }
@@ -385,7 +386,7 @@ double calc_system_energy(double mass, double *vx, double *vy, double *vz, int n
   int i;
   double totalEnergy = 0.0, systemEnergy;
   __m512d vec_totalEnergy = _mm512_set1_pd(0.0);
-  for (i=0; i<num; i++) {
+  for (i=0; i<num; i += 8) {
     // Load mass elements if i<num, else set to 0.
     __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
     __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1); // OP: 1 is LT
@@ -394,9 +395,8 @@ double calc_system_energy(double mass, double *vx, double *vy, double *vz, int n
     __m512d vec_vz = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vz + i);
     // The expression "d += a*a + b*b + c*c" can be done using 3 fma ops:
     //  fma(a, a, fma(b, b, fma(c, c, d))
-    __m512d vec_totalEnergy = _mm512_fmadd_pd(vec_vz, vec_vz,
-                                        _mm512_fmadd_pd(vec_vy, vec_vy,
-                                        _mm512_fmadd_pd(vec_vx, vec_vx, vec_totalEnergy)));
+    vec_totalEnergy = _mm512_fmadd_pd(vec_vz, vec_vz, _mm512_fmadd_pd(vec_vy, vec_vy,
+                                      _mm512_fmadd_pd(vec_vx, vec_vx, vec_totalEnergy)));
   }
 
   totalEnergy = _mm512_reduce_add_pd(vec_totalEnergy) * 0.5 * mass;
