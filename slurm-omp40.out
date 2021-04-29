@@ -1,0 +1,11 @@
+Node list                    : node060
+Number of nodes allocated    : 1 or 1
+Requested CPUs per task      : 40
+compiling aerosol-openmp.c to aerosol-openmp.exe
+using 40 OpenMP threads
+Initializing for 20000 particles in x,y,z space...  (malloc-ed)    INIT COMPLETE
+Time 0. System energy=0
+Now to integrate for 50 timesteps
+Time to init+solve 20000 molecules for 50 timesteps is 4.83618 seconds
+Centre of mass = (-0.018602,1.589,51.0976)
+
