@@ -19,16 +19,11 @@
 #include <math.h>
 #include <omp.h>
 
-#include <mkl.h>
 #include <immintrin.h>
 
 
-void print_mask(__mmask8 var)
-{
-    int8_t val;
-    memcpy(&val, &var, sizeof(val));
-    printf("Numerical: %i \n", val);
-}
+/// Custom (+) reduction for AVX-512 registers
+#pragma omp declare reduction(+ : __m512d : omp_out = _mm512_add_pd(omp_out, omp_in))
 
 double liquid_mass=2.0, gas_mass=0.3, k=0.00001;
 
@@ -160,19 +155,22 @@ int main(int argc, char* argv[]) {
 
 
   // time=0 was initial conditions
-  // #pragma omp parallel private(time, i, j)
-  {
-    for (time=1; time<=timesteps; time++) {
+  for (time=1; time<=timesteps; time++) {
 
+    #pragma omp parallel default(none) \
+                         private(i, j) \
+                         shared(num, x, y, z, mass, old_x, old_z, old_y, old_mass, vx, vy, vz, gas,\
+                                loss_rate, liquid, totalMass, systemEnergy, T, vec_tKExpNegative, \
+                                vec_GRAVCONST, vec_gas_mass, vec_liquid_mass, vec_totalMass)
+    {
       // LOOP1: take snapshot to use on RHS when looping for updates
-      // memcpy at 512-bit granularity
-  // #pragma omp parallel for default(none) private(i) shared(old_x, old_z, old_y, old_mass, \
-                                            // x, y, z, mass, num) schedule(static, 1)
+      #pragma omp for schedule(static, 1)
       for (i=0; i<num; i += 8) {
           // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
           __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
           __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
 
+          // memcpy at 512-bit granularity
           _mm512_mask_store_pd(old_x + i, i_mask,
                                _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, x + i));
           _mm512_mask_store_pd(old_y + i, i_mask,
@@ -184,7 +182,7 @@ int main(int argc, char* argv[]) {
       }
 
       // LOOP2: update position etc per particle (based on old data)
-      // #pragma omp for schedule(static, 1)
+      #pragma omp for schedule(static, 1)
       for(i=0; i<num; i += 8) {
         __m512d vec_old_x, vec_old_y, vec_old_z, vec_old_mass;
 
@@ -192,7 +190,7 @@ int main(int argc, char* argv[]) {
         __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
         __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
 
-        // Load into AVX-512 registers.
+        // Load into AVX-512 registers. (only i<num elemenets are loaded, else the lane is set to 0.0).
         __m512d vec_x = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, x + i);
         __m512d vec_y = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, y + i);
         __m512d vec_z = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, z + i);
@@ -274,30 +272,33 @@ int main(int argc, char* argv[]) {
         _mm512_mask_store_pd(vz + i, i_mask, vec_vz);
 
       } // end of LOOP 2
-
       //    output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
 
-      // Do a reduction. First into an AVX3 vec, then into double.
-      // Load mass elements if i<num, else set to 0.
-      __m512i vec_i = _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7);
-      __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
-      __m512d vec_totalMass = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass);
-      // #pragma omp for schedule(static, 1)
-      for (i=8; i<num; i += 8) {
-        vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
-        i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
-        vec_totalMass = _mm512_add_pd(_mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i),
-                                      vec_totalMass);
+      vec_totalMass = _mm512_set1_pd(0.0);
+
+      #pragma omp for reduction(+ : vec_totalMass) schedule(static, 1)
+      for (i=0; i<num; i += 8) {
+        __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+        __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
+        // Load mass elements if i<num, else set to 0.
+        __m512d this_vec_mass = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i);
+
+        vec_totalMass += this_vec_mass;
       }
-      totalMass = _mm512_reduce_add_pd(vec_totalMass);
 
-      systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
+      // single waits for all threads to jon, before preceding on one thread.
+      #pragma omp single
+      {
+        totalMass = _mm512_reduce_add_pd(vec_totalMass);
+        systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
 
-      // printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n", time, T, systemEnergy, totalMass);
-      // temperature drops per timestep
-      T *= 0.99999;
-    } // time steps
-  }
+        // printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n", time, T, systemEnergy, totalMass);
+        // temperature drops per timestep
+        T *= 0.99999;
+      }
+
+    } // end omp parallel
+  } // time steps
 
   printf("Time to init+solve %d molecules for %d timesteps is %g seconds\n", num, timesteps, omp_get_wtime()-start);
 
@@ -339,14 +340,16 @@ int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, 
 
   // Each thread accesses the half-open range of [i : i+8) within ranvec.
   // We can use a chunk size of 8 with the schedule static.
-  #pragma omp parallel for default(none) private(i) \
-                                         shared(ranvec, num, min_pos, recipDivBy2, recipDivBy25, \
-                                                multTimesRecip, maxVelTimes2, \
-                                                maxVelTimes2TimesRecip, maxVel, x, y, z, vx, \
-                                                vy, vz, loss_rate, gas, liquid) \
-                                         schedule(static, 8)
+  #pragma omp parallel for default(none) \
+                           private(i) \
+                           shared(ranvec, num, min_pos, recipDivBy2, recipDivBy25, multTimesRecip, \
+                                  maxVelTimes2, maxVelTimes2TimesRecip, maxVel, x, y, z, \
+                                  vx, vy, vz, loss_rate, gas, liquid) \
+                           schedule(static, 8)
   for (i=0; i<num; i++) {
   {
+    // TODO: we could use SIMD here as well, with a gather load into ranvec to preserve order.
+    //       But init() doesn't take many cycles, so probably not worth the effort.
       double *thisRanvec = ranvec + (i << 3); // i*8
 
       x[i] = min_pos + thisRanvec[0] * multTimesRecip;
