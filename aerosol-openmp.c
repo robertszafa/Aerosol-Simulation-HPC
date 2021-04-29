@@ -221,14 +221,14 @@ int main(int argc, char* argv[]) {
 
           // The expression "a*a + b*b + c*c" can be done using 1 mul and 2 fma ops:
           //  fma(a, a, fma(b, b, mul(c, c))
-          __m512d vec_temp_d = _mm512_fmadd_pd(vec_dz, vec_dz,
-                                               _mm512_fmadd_pd(vec_dy, vec_dy,
-                                               _mm512_mul_pd(vec_dx, vec_dx)));
-          __m512d vec_d = _mm512_max_pd(vec_temp_d, _mm512_set1_pd(0.0001));
+          __m512d vec_temp_d = _mm512_max_pd(_mm512_set1_pd(0.0001), _mm512_fmadd_pd(vec_dz, vec_dz,
+                                                      _mm512_fmadd_pd(vec_dy, vec_dy,
+                                                      _mm512_mul_pd(vec_dx, vec_dx))));
+          __m512d vec_d = _mm512_sqrt_pd(vec_temp_d);
 
           // Note: mass is not factored in, since when calculating ax, ay, az we do F/mass.
           //       The same goes for d*d. Since it is sqrt'ed later, we don't have to multiply here.
-          __m512d vec_F = _mm512_div_pd(_mm512_mul_pd(vec_GRAVCONST, vec_old_mass), vec_d);
+          __m512d vec_F = _mm512_div_pd(_mm512_mul_pd(vec_GRAVCONST, vec_old_mass), vec_temp_d);
 
           // calculate acceleration due to the force, F and add to velocities
           // (approximate velocities in "unit time")
@@ -262,6 +262,13 @@ int main(int argc, char* argv[]) {
         // "sqrt(old_mass * v_squared / mass) / sqrt(v_squared)"" can be simpliefied to:
         // "sqrt(old_mass / mass)", if numbers rooted are >0 (guranteed for mass & velocities).
         __m512d factor = _mm512_sqrt_pd(_mm512_div_pd(vec_old_mass, vec_mass));
+      // double v_squared = vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i];
+        // __m512d vec_v_squared = _mm512_fmadd_pd(vec_vz, vec_vz, _mm512_fmadd_pd(vec_vy, vec_vy,
+        //                                                           _mm512_mul_pd(vec_vx, vec_vx)));
+      // double factor = sqrt(old_mass[i]*v_squared/mass[i])/sqrt(v_squared);
+        // __m512d factor = _mm512_div_pd(_mm512_sqrt_pd(
+        //                       _mm512_div_pd(_mm512_mul_pd(vec_old_mass, vec_v_squared), vec_mass)),
+        //                       _mm512_sqrt_pd(vec_v_squared));
 
         vec_vx = _mm512_mul_pd(factor, vec_vx);
         vec_vy = _mm512_mul_pd(factor, vec_vy);
@@ -378,6 +385,32 @@ int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, 
 } // init
 
 
+// double calc_system_energy(double mass, double *vx, double *vy, double *vz, int num) {
+//   /*
+//      energy is sum of 0.5*mass*velocity^2
+//      where velocity^2 is sum of squares of components
+//   */
+//   int i;
+//   double totalEnergy = 0.0, systemEnergy;
+//   __m512d vec_totalEnergy = _mm512_set1_pd(0.0);
+//   for (i=0; i<num; i += 8) {
+//     // Load mass elements if i<num, else set to 0.
+//     __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+//     __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1); // OP: 1 is LT
+//     __m512d vec_vx = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vx + i);
+//     __m512d vec_vy = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vy + i);
+//     __m512d vec_vz = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vz + i);
+//     // The expression "d += a*a + b*b + c*c" can be done using 3 fma ops:
+//     //  fma(a, a, fma(b, b, fma(c, c, d))
+//     vec_totalEnergy = _mm512_fmadd_pd(vec_vz, vec_vz, _mm512_fmadd_pd(vec_vy, vec_vy,
+//                                       _mm512_fmadd_pd(vec_vx, vec_vx, vec_totalEnergy)));
+//   }
+
+//   totalEnergy = _mm512_reduce_add_pd(vec_totalEnergy) * 0.5 * mass;
+//   systemEnergy = totalEnergy / (double) num;
+//   return systemEnergy;
+// }
+
 double calc_system_energy(double mass, double *vx, double *vy, double *vz, int num) {
   /*
      energy is sum of 0.5*mass*velocity^2
@@ -385,21 +418,10 @@ double calc_system_energy(double mass, double *vx, double *vy, double *vz, int n
   */
   int i;
   double totalEnergy = 0.0, systemEnergy;
-  __m512d vec_totalEnergy = _mm512_set1_pd(0.0);
-  for (i=0; i<num; i += 8) {
-    // Load mass elements if i<num, else set to 0.
-    __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
-    __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1); // OP: 1 is LT
-    __m512d vec_vx = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vx + i);
-    __m512d vec_vy = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vy + i);
-    __m512d vec_vz = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vz + i);
-    // The expression "d += a*a + b*b + c*c" can be done using 3 fma ops:
-    //  fma(a, a, fma(b, b, fma(c, c, d))
-    vec_totalEnergy = _mm512_fmadd_pd(vec_vz, vec_vz, _mm512_fmadd_pd(vec_vy, vec_vy,
-                                      _mm512_fmadd_pd(vec_vx, vec_vx, vec_totalEnergy)));
+  for (i=0; i<num; i++) {
+    totalEnergy += vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i];
   }
-
-  totalEnergy = _mm512_reduce_add_pd(vec_totalEnergy) * 0.5 * mass;
+  totalEnergy = 0.5 * mass * totalEnergy;
   systemEnergy = totalEnergy / (double) num;
   return systemEnergy;
 }
