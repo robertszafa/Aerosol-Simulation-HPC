@@ -97,13 +97,17 @@ int main(int argc, char* argv[]) {
   __m512d vec_GRAVCONST = _mm512_set1_pd(GRAVCONST);
   __m512d vec_gas_mass = _mm512_set1_pd(gas_mass);
   __m512d vec_liquid_mass = _mm512_set1_pd(liquid_mass);
-
-  // // Calculate mass & do a (+=) reduction into totalMass. First into an AVX3 vec, then into double.
   __m512d vec_totalMass = _mm512_set1_pd(0.0);
-  #pragma omp parallel for default(none) \
-                           private(i) \
-                           shared(num, gas, liquid, mass, vec_gas_mass, vec_liquid_mass) \
-                           reduction(+ : vec_totalMass) schedule(static, 1)
+
+  #pragma omp parallel default(none) \
+                       private(i, j, time) \
+                       shared(num, x, y, z, mass, old_x, old_z, old_y, old_mass, vx, vy, vz, gas,\
+                              k, loss_rate, liquid, totalMass, systemEnergy, T, timesteps, vec_GRAVCONST, \
+                              vec_GRAVCONST, vec_gas_mass, vec_liquid_mass, vec_totalMass, vec_totalMass)
+  {
+
+  // Calculate mass & do a (+=) reduction into totalMass. First into an AVX3 vec, then into double.
+  #pragma omp parallel for reduction(+ : vec_totalMass) schedule(static, 1)
   for (i=0; i<num; i += 8) {
     // Load mass elements if i<num, else set to 0.
     __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
@@ -119,10 +123,16 @@ int main(int argc, char* argv[]) {
     // Store back to mem.
     _mm512_mask_store_pd(mass + i, i_mask, vec_mass);
   }
+
+  // Wait for threads to join and do AVX->double reduction on a single thread.
+  #pragma omp single
   totalMass = _mm512_reduce_add_pd(vec_totalMass);
 
   //DEBUG  output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
+  #pragma omp single
   systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
+
+  #pragma omp single
   printf("Time 0. System energy=%g\n", systemEnergy);
 
   /*
@@ -152,18 +162,12 @@ int main(int argc, char* argv[]) {
   */
 
 
+  #pragma omp single
   printf("Now to integrate for %d timesteps\n", timesteps);
 
 
   // time=0 was initial conditions
   for (time=1; time<=timesteps; time++) {
-
-    #pragma omp parallel default(none) \
-                         private(i, j) \
-                         shared(num, x, y, z, mass, old_x, old_z, old_y, old_mass, vx, vy, vz, gas,\
-                                k, loss_rate, liquid, totalMass, systemEnergy, T, time, vec_GRAVCONST, \
-                                vec_GRAVCONST, vec_gas_mass, vec_liquid_mass, vec_totalMass)
-    {
       // LOOP1: take snapshot to use on RHS when looping for updates
       #pragma omp for schedule(static, 1)
       for (i=0; i<num; i += 8) {
@@ -181,6 +185,7 @@ int main(int argc, char* argv[]) {
           _mm512_mask_store_pd(old_mass + i, i_mask,
                                _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i));
       }
+      // Wait for all threads to join.
 
       // The exp func has to be done just once per timestep.
       __m512d vec_exp_kT = _mm512_set1_pd(exp(-k*T));
@@ -305,8 +310,9 @@ int main(int argc, char* argv[]) {
       }
 
       // join threads before next timestep
-    } // end omp parallel
   } // time steps
+
+  } // end omp parallel
 
   printf("Time to init+solve %d molecules for %d timesteps is %g seconds\n", num, timesteps, omp_get_wtime()-start);
 
