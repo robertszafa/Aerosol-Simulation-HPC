@@ -100,6 +100,10 @@ int main(int argc, char* argv[]) {
 
   // // Calculate mass & do a (+=) reduction into totalMass. First into an AVX3 vec, then into double.
   __m512d vec_totalMass = _mm512_set1_pd(0.0);
+  #pragma omp parallel for default(none) \
+                           private(i) \
+                           shared(num, gas, liquid, mass, vec_gas_mass, vec_liquid_mass) \
+                           reduction(+ : vec_totalMass) schedule(static, 1)
   for (i=0; i<num; i += 8) {
     // Load mass elements if i<num, else set to 0.
     __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);

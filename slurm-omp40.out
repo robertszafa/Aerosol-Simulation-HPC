@@ -35,29 +35,29 @@ At end of timestep 26 with temp 299.925009 the system energy=726426 and total ae
 At end of timestep 27 with temp 299.922010 the system energy=726998 and total aerosol mass=25641.9
 At end of timestep 28 with temp 299.919011 the system energy=727534 and total aerosol mass=25917.7
 At end of timestep 29 with temp 299.916011 the system energy=728036 and total aerosol mass=26186.6
-At end of timestep 30 with temp 299.913012 the system energy=728505 and total aerosol mass=26448.5
+At end of timestep 30 with temp 299.913012 the system energy=728504 and total aerosol mass=26448.5
 At end of timestep 31 with temp 299.910013 the system energy=728941 and total aerosol mass=26703.8
 At end of timestep 32 with temp 299.907014 the system energy=729347 and total aerosol mass=26952.7
-At end of timestep 33 with temp 299.904015 the system energy=729724 and total aerosol mass=27195.2
+At end of timestep 33 with temp 299.904015 the system energy=729723 and total aerosol mass=27195.2
 At end of timestep 34 with temp 299.901016 the system energy=730072 and total aerosol mass=27431.7
 At end of timestep 35 with temp 299.898017 the system energy=730393 and total aerosol mass=27662.3
 At end of timestep 36 with temp 299.895018 the system energy=730688 and total aerosol mass=27887.2
 At end of timestep 37 with temp 299.892019 the system energy=730959 and total aerosol mass=28106.5
-At end of timestep 38 with temp 299.889020 the system energy=731207 and total aerosol mass=28320.4
+At end of timestep 38 with temp 299.889020 the system energy=731206 and total aerosol mass=28320.4
 At end of timestep 39 with temp 299.886021 the system energy=731432 and total aerosol mass=28529.1
-At end of timestep 40 with temp 299.883022 the system energy=731636 and total aerosol mass=28732.6
+At end of timestep 40 with temp 299.883022 the system energy=731635 and total aerosol mass=28732.6
 At end of timestep 41 with temp 299.880023 the system energy=731819 and total aerosol mass=28931.3
 At end of timestep 42 with temp 299.877025 the system energy=731984 and total aerosol mass=29125.1
 At end of timestep 43 with temp 299.874026 the system energy=732130 and total aerosol mass=29314.3
-At end of timestep 44 with temp 299.871027 the system energy=732260 and total aerosol mass=29499
-At end of timestep 45 with temp 299.868028 the system energy=732373 and total aerosol mass=29679.2
+At end of timestep 44 with temp 299.871027 the system energy=732259 and total aerosol mass=29499
+At end of timestep 45 with temp 299.868028 the system energy=732372 and total aerosol mass=29679.2
 At end of timestep 46 with temp 299.865030 the system energy=732470 and total aerosol mass=29855.2
 At end of timestep 47 with temp 299.862031 the system energy=732553 and total aerosol mass=30027
 At end of timestep 48 with temp 299.859032 the system energy=732622 and total aerosol mass=30194.9
 At end of timestep 49 with temp 299.856034 the system energy=732678 and total aerosol mass=30358.7
 At end of timestep 50 with temp 299.853035 the system energy=732722 and total aerosol mass=30518.8
-Time to init+solve 20000 molecules for 50 timesteps is 3.90313 seconds
-Centre of mass = (-0.0183491,1.59068,51.0959)
+Time to init+solve 20000 molecules for 50 timesteps is 3.97946 seconds
+Centre of mass = (-0.018349,1.59068,51.0959)
 
 Initializing for 20000 particles in x,y,z space...  (malloc-ed)    INIT COMPLETE
 Time 0. System energy=721112
@@ -91,29 +91,29 @@ At end of timestep 26 with temp 299.925009 the system energy=726426 and total ae
 At end of timestep 27 with temp 299.922010 the system energy=726998 and total aerosol mass=25641.9
 At end of timestep 28 with temp 299.919011 the system energy=727534 and total aerosol mass=25917.7
 At end of timestep 29 with temp 299.916011 the system energy=728036 and total aerosol mass=26186.6
-At end of timestep 30 with temp 299.913012 the system energy=728505 and total aerosol mass=26448.5
+At end of timestep 30 with temp 299.913012 the system energy=728504 and total aerosol mass=26448.5
 At end of timestep 31 with temp 299.910013 the system energy=728941 and total aerosol mass=26703.8
 At end of timestep 32 with temp 299.907014 the system energy=729347 and total aerosol mass=26952.7
-At end of timestep 33 with temp 299.904015 the system energy=729724 and total aerosol mass=27195.2
+At end of timestep 33 with temp 299.904015 the system energy=729723 and total aerosol mass=27195.2
 At end of timestep 34 with temp 299.901016 the system energy=730072 and total aerosol mass=27431.7
 At end of timestep 35 with temp 299.898017 the system energy=730393 and total aerosol mass=27662.3
 At end of timestep 36 with temp 299.895018 the system energy=730688 and total aerosol mass=27887.2
 At end of timestep 37 with temp 299.892019 the system energy=730959 and total aerosol mass=28106.5
-At end of timestep 38 with temp 299.889020 the system energy=731207 and total aerosol mass=28320.4
+At end of timestep 38 with temp 299.889020 the system energy=731206 and total aerosol mass=28320.4
 At end of timestep 39 with temp 299.886021 the system energy=731432 and total aerosol mass=28529.1
-At end of timestep 40 with temp 299.883022 the system energy=731636 and total aerosol mass=28732.6
+At end of timestep 40 with temp 299.883022 the system energy=731635 and total aerosol mass=28732.6
 At end of timestep 41 with temp 299.880023 the system energy=731819 and total aerosol mass=28931.3
 At end of timestep 42 with temp 299.877025 the system energy=731984 and total aerosol mass=29125.1
 At end of timestep 43 with temp 299.874026 the system energy=732130 and total aerosol mass=29314.3
-At end of timestep 44 with temp 299.871027 the system energy=732260 and total aerosol mass=29499
-At end of timestep 45 with temp 299.868028 the system energy=732373 and total aerosol mass=29679.2
+At end of timestep 44 with temp 299.871027 the system energy=732259 and total aerosol mass=29499
+At end of timestep 45 with temp 299.868028 the system energy=732372 and total aerosol mass=29679.2
 At end of timestep 46 with temp 299.865030 the system energy=732470 and total aerosol mass=29855.2
 At end of timestep 47 with temp 299.862031 the system energy=732553 and total aerosol mass=30027
 At end of timestep 48 with temp 299.859032 the system energy=732622 and total aerosol mass=30194.9
 At end of timestep 49 with temp 299.856034 the system energy=732678 and total aerosol mass=30358.7
 At end of timestep 50 with temp 299.853035 the system energy=732722 and total aerosol mass=30518.8
-Time to init+solve 20000 molecules for 50 timesteps is 3.90275 seconds
-Centre of mass = (-0.0183491,1.59068,51.0959)
+Time to init+solve 20000 molecules for 50 timesteps is 3.93762 seconds
+Centre of mass = (-0.018349,1.59068,51.0959)
 
 Initializing for 20000 particles in x,y,z space...  (malloc-ed)    INIT COMPLETE
 Time 0. System energy=721112
@@ -147,27 +147,27 @@ At end of timestep 26 with temp 299.925009 the system energy=726426 and total ae
 At end of timestep 27 with temp 299.922010 the system energy=726998 and total aerosol mass=25641.9
 At end of timestep 28 with temp 299.919011 the system energy=727534 and total aerosol mass=25917.7
 At end of timestep 29 with temp 299.916011 the system energy=728036 and total aerosol mass=26186.6
-At end of timestep 30 with temp 299.913012 the system energy=728505 and total aerosol mass=26448.5
+At end of timestep 30 with temp 299.913012 the system energy=728504 and total aerosol mass=26448.5
 At end of timestep 31 with temp 299.910013 the system energy=728941 and total aerosol mass=26703.8
 At end of timestep 32 with temp 299.907014 the system energy=729347 and total aerosol mass=26952.7
-At end of timestep 33 with temp 299.904015 the system energy=729724 and total aerosol mass=27195.2
+At end of timestep 33 with temp 299.904015 the system energy=729723 and total aerosol mass=27195.2
 At end of timestep 34 with temp 299.901016 the system energy=730072 and total aerosol mass=27431.7
 At end of timestep 35 with temp 299.898017 the system energy=730393 and total aerosol mass=27662.3
 At end of timestep 36 with temp 299.895018 the system energy=730688 and total aerosol mass=27887.2
 At end of timestep 37 with temp 299.892019 the system energy=730959 and total aerosol mass=28106.5
-At end of timestep 38 with temp 299.889020 the system energy=731207 and total aerosol mass=28320.4
+At end of timestep 38 with temp 299.889020 the system energy=731206 and total aerosol mass=28320.4
 At end of timestep 39 with temp 299.886021 the system energy=731432 and total aerosol mass=28529.1
-At end of timestep 40 with temp 299.883022 the system energy=731636 and total aerosol mass=28732.6
+At end of timestep 40 with temp 299.883022 the system energy=731635 and total aerosol mass=28732.6
 At end of timestep 41 with temp 299.880023 the system energy=731819 and total aerosol mass=28931.3
 At end of timestep 42 with temp 299.877025 the system energy=731984 and total aerosol mass=29125.1
 At end of timestep 43 with temp 299.874026 the system energy=732130 and total aerosol mass=29314.3
-At end of timestep 44 with temp 299.871027 the system energy=732260 and total aerosol mass=29499
-At end of timestep 45 with temp 299.868028 the system energy=732373 and total aerosol mass=29679.2
+At end of timestep 44 with temp 299.871027 the system energy=732259 and total aerosol mass=29499
+At end of timestep 45 with temp 299.868028 the system energy=732372 and total aerosol mass=29679.2
 At end of timestep 46 with temp 299.865030 the system energy=732470 and total aerosol mass=29855.2
 At end of timestep 47 with temp 299.862031 the system energy=732553 and total aerosol mass=30027
 At end of timestep 48 with temp 299.859032 the system energy=732622 and total aerosol mass=30194.9
 At end of timestep 49 with temp 299.856034 the system energy=732678 and total aerosol mass=30358.7
 At end of timestep 50 with temp 299.853035 the system energy=732722 and total aerosol mass=30518.8
-Time to init+solve 20000 molecules for 50 timesteps is 5.2024 seconds
-Centre of mass = (-0.0183491,1.59068,51.0959)
+Time to init+solve 20000 molecules for 50 timesteps is 3.9697 seconds
+Centre of mass = (-0.018349,1.59068,51.0959)
 
