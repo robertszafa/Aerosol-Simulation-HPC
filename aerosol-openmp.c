@@ -93,18 +93,16 @@ int main(int argc, char* argv[]) {
     printf("  INIT COMPLETE\n");
   }
 
-
-
   // Expand constants into AVX-512 form.
   __m512d vec_GRAVCONST = _mm512_set1_pd(GRAVCONST);
   __m512d vec_gas_mass = _mm512_set1_pd(gas_mass);
   __m512d vec_liquid_mass = _mm512_set1_pd(liquid_mass);
 
-  // Calculate mass & do a (+=) reduction into totalMass. First into an AVX3 vec, then into double.
+  // // Calculate mass & do a (+=) reduction into totalMass. First into an AVX3 vec, then into double.
   __m512d vec_totalMass = _mm512_set1_pd(0.0);
   for (i=0; i<num; i += 8) {
     // Load mass elements if i<num, else set to 0.
-    __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+    __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
     __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1); // OP: 1 is LT
     __m512d vec_gas = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, gas + i);
     __m512d vec_liquid = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, liquid + i);
@@ -166,7 +164,7 @@ int main(int argc, char* argv[]) {
       #pragma omp for schedule(static, 1)
       for (i=0; i<num; i += 8) {
           // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
-          __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+          __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
           __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
 
           // memcpy at 512-bit granularity
@@ -189,7 +187,7 @@ int main(int argc, char* argv[]) {
         __m512d vec_old_x, vec_old_y, vec_old_z, vec_old_mass;
 
         // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
-        __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+        __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
         __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
 
         // Load into AVX-512 registers. (only i<num elemenets are loaded, else the lane is set to 0.0).
@@ -282,7 +280,7 @@ int main(int argc, char* argv[]) {
       vec_totalMass = _mm512_set1_pd(0.0);
       #pragma omp for reduction(+ : vec_totalMass) schedule(static, 1)
       for (i=0; i<num; i += 8) {
-        __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+        __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
         __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
         // Load mass elements if i<num, else set to 0.
         __m512d this_vec_mass = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i);
@@ -393,7 +391,7 @@ double calc_system_energy(double mass, double *vx, double *vy, double *vz, int n
   __m512d vec_totalEnergy = _mm512_set1_pd(0.0);
   for (i=0; i<num; i += 8) {
     // Load mass elements if i<num, else set to 0.
-    __m512i vec_i = _mm512_set_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+    __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
     __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1); // OP: 1 is LT
     __m512d vec_vx = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vx + i);
     __m512d vec_vy = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vy + i);
