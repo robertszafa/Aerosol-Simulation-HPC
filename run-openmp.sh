@@ -10,7 +10,8 @@
 
 
 # Specific course queue
-#SBATCH -p course
+#SBATCH -p course -n 1 -t 5
+##--exclusive
 
 # Defaults on Barkla (but set to be safe)
 ## Specify the current working directory as the location for executables/files
