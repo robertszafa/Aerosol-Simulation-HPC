@@ -20,6 +20,7 @@
 #include <omp.h>
 
 #include <mpi.h>
+
 #include <immintrin.h>
 
 
@@ -91,15 +92,13 @@ int main(int argc, char* argv[]) {
     printf("  INIT COMPLETE\n");
   }
 
-
-
   // Expand constants into AVX-512 form.
   __m512d vec_GRAVCONST = _mm512_set1_pd(GRAVCONST);
   __m512d vec_gas_mass = _mm512_set1_pd(gas_mass);
   __m512d vec_liquid_mass = _mm512_set1_pd(liquid_mass);
+  __m512d vec_totalMass = _mm512_set1_pd(0.0);
 
   // Calculate mass & do a (+=) reduction into totalMass. First into an AVX3 vec, then into double.
-  __m512d vec_totalMass = _mm512_set1_pd(0.0);
   for (i=0; i<num; i += 8) {
     // Load mass elements if i<num, else set to 0.
     __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
@@ -111,15 +110,18 @@ int main(int argc, char* argv[]) {
     // Will have 0 for elements i >= num.
     __m512d vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
                                        _mm512_mul_pd(vec_liquid, vec_liquid_mass));
-    vec_totalMass = _mm512_add_pd(vec_mass, vec_totalMass);
+    vec_totalMass += vec_mass;
     // Store back to mem.
     _mm512_mask_store_pd(mass + i, i_mask, vec_mass);
   }
-  totalMass = _mm512_reduce_add_pd(vec_totalMass);
+    //DEBUG  output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
 
-  //DEBUG  output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
+  // Wait for threads to join and do AVX->double reduction on a single thread.
+  totalMass = _mm512_reduce_add_pd(vec_totalMass);
   systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
   printf("Time 0. System energy=%g\n", systemEnergy);
+
+  printf("Now to integrate for %d timesteps\n", timesteps);
 
   /*
      MAIN TIME STEPPING LOOP
@@ -148,11 +150,8 @@ int main(int argc, char* argv[]) {
   */
 
 
-  printf("Now to integrate for %d timesteps\n", timesteps);
-
   // time=0 was initial conditions
   for (time=1; time<=timesteps; time++) {
-
       // LOOP1: take snapshot to use on RHS when looping for updates
       for (i=0; i<num; i += 8) {
           // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
@@ -280,7 +279,6 @@ int main(int argc, char* argv[]) {
       // AVX vector -> double reduction.
       totalMass = _mm512_reduce_add_pd(vec_totalMass);
       systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
-
       printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n", time, T, systemEnergy, totalMass);
       // temperature drops per timestep
       T *= 0.99999;
@@ -327,36 +325,24 @@ int init(double *mass, double *x, double *y, double *z, double *vx, double *vy, 
   double maxVelTimes2 = 2.0*maxVel;
   double maxVelTimes2TimesRecip = maxVelTimes2 * recip;
 
-  // Each thread accesses the half-open range of [i : i+8) within ranvec.
-  // We can use a chunk size of 8 with the schedule static.
-  #pragma omp parallel for default(none) \
-                           private(i) \
-                           shared(ranvec, num, min_pos, recipDivBy2, recipDivBy25, multTimesRecip, \
-                                  maxVelTimes2, maxVelTimes2TimesRecip, maxVel, x, y, z, \
-                                  vx, vy, vz, loss_rate, gas, liquid) \
-                           schedule(static, 8)
   for (i=0; i<num; i++) {
-  {
     // TODO: we could use SIMD here as well, with a gather load into ranvec to preserve order.
     //       But init() doesn't take many cycles, so probably not worth the effort.
-      double *thisRanvec = ranvec + (i << 3); // i*8
+    double *thisRanvec = ranvec + (i << 3); // i*8
 
-      x[i] = min_pos + thisRanvec[0] * multTimesRecip;
-      y[i] = min_pos + thisRanvec[1] * multTimesRecip;
-      z[i] = thisRanvec[2] * multTimesRecip;
+    x[i] = min_pos + thisRanvec[0] * multTimesRecip;
+    y[i] = min_pos + thisRanvec[1] * multTimesRecip;
+    z[i] = thisRanvec[2] * multTimesRecip;
 
-      vx[i] = -maxVel + thisRanvec[3] * maxVelTimes2TimesRecip;
-      vy[i] = -maxVel + thisRanvec[4] * maxVelTimes2TimesRecip;
-      vz[i] = -maxVel + thisRanvec[5] * maxVelTimes2TimesRecip;
+    vx[i] = -maxVel + thisRanvec[3] * maxVelTimes2TimesRecip;
+    vy[i] = -maxVel + thisRanvec[4] * maxVelTimes2TimesRecip;
+    vz[i] = -maxVel + thisRanvec[5] * maxVelTimes2TimesRecip;
 
-      // proportion of aerosol that evaporates
-      loss_rate[i] = 1.0 - thisRanvec[7] * recipDivBy25;
-      // aerosol is component of gas and (1-comp) of liquid
-      gas[i] = .5 + thisRanvec[6] * recipDivBy2;
-      liquid[i] = (1.0 - gas[i]);
-    }
-
-    /// Threads join here.
+    // proportion of aerosol that evaporates
+    loss_rate[i] = 1.0 - thisRanvec[7] * recipDivBy25;
+    // aerosol is component of gas and (1-comp) of liquid
+    gas[i] = .5 + thisRanvec[6] * recipDivBy2;
+    liquid[i] = (1.0 - gas[i]);
   }
 
   // release temp memory for ranvec which is no longer required

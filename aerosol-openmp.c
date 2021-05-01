@@ -23,7 +23,9 @@
 
 
 /// Custom (+) reduction for AVX-512 registers
-#pragma omp declare reduction(+ : __m512d : omp_out = _mm512_add_pd(omp_out, omp_in))
+#pragma omp declare reduction(+ : __m512d : omp_out = _mm512_add_pd(omp_out, omp_in)) \
+                    initializer(omp_priv = _mm512_set1_pd(0.0))
+
 
 double liquid_mass=2.0, gas_mass=0.3, k=0.00001;
 
@@ -107,7 +109,7 @@ int main(int argc, char* argv[]) {
   {
 
   // Calculate mass & do a (+=) reduction into totalMass. First into an AVX3 vec, then into double.
-  #pragma omp parallel for reduction(+ : vec_totalMass) schedule(static, 1)
+  #pragma omp for reduction(+ : vec_totalMass) schedule(static, 1)
   for (i=0; i<num; i += 8) {
     // Load mass elements if i<num, else set to 0.
     __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
@@ -119,21 +121,21 @@ int main(int argc, char* argv[]) {
     // Will have 0 for elements i >= num.
     __m512d vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
                                        _mm512_mul_pd(vec_liquid, vec_liquid_mass));
-    vec_totalMass = _mm512_add_pd(vec_mass, vec_totalMass);
+    vec_totalMass += vec_mass;
     // Store back to mem.
     _mm512_mask_store_pd(mass + i, i_mask, vec_mass);
   }
+    //DEBUG  output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
 
   // Wait for threads to join and do AVX->double reduction on a single thread.
   #pragma omp single
-  totalMass = _mm512_reduce_add_pd(vec_totalMass);
+  {
+    totalMass = _mm512_reduce_add_pd(vec_totalMass);
+    systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
+    printf("Time 0. System energy=%g\n", systemEnergy);
 
-  //DEBUG  output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
-  #pragma omp single
-  systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
-
-  #pragma omp single
-  printf("Time 0. System energy=%g\n", systemEnergy);
+    printf("Now to integrate for %d timesteps\n", timesteps);
+  } // end omp single
 
   /*
      MAIN TIME STEPPING LOOP
@@ -160,10 +162,6 @@ int main(int argc, char* argv[]) {
      the centre of mass of the final system configuration.
 
   */
-
-
-  #pragma omp single
-  printf("Now to integrate for %d timesteps\n", timesteps);
 
 
   // time=0 was initial conditions
@@ -298,12 +296,11 @@ int main(int argc, char* argv[]) {
       }
 
       // single waits for all threads to join, before preceding on one thread.
+      // AVX vector -> double reduction.
       #pragma omp single
       {
-        // AVX vector -> double reduction.
         totalMass = _mm512_reduce_add_pd(vec_totalMass);
         systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
-
         printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n", time, T, systemEnergy, totalMass);
         // temperature drops per timestep
         T *= 0.99999;
