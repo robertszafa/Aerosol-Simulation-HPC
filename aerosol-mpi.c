@@ -32,6 +32,12 @@ void output_particles(double*, double*, double*, double*, double*, double*, doub
 void calc_centre_mass(double*, double*, double*, double*, double*, double, int);
 
 int main(int argc, char* argv[]) {
+
+  MPI_Init(NULL, NULL);
+  int numProcesses, rankNum;
+  MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rankNum);
+
   int i, j;
   int num;     // user defined (argv[1]) total number of gas molecules in simulation
   int time, timesteps; // for time stepping, including user defined (argv[2]) number of timesteps to integrate
@@ -43,7 +49,9 @@ int main(int argc, char* argv[]) {
   double *old_x, *old_y, *old_z, *old_mass;            // save previous values whilst doing global updates
   double totalMass, systemEnergy;  // for stats
 
-  double start=omp_get_wtime();   // we make use of the simple wall clock timer available in OpenMP
+  double start;
+  if (rankNum == 0)
+    start=omp_get_wtime();   // we make use of the simple wall clock timer available in OpenMP
 
   /* if avail, input size of system */
   if (argc > 1 ) {
@@ -82,7 +90,17 @@ int main(int argc, char* argv[]) {
     printf("  (malloc-ed)  ");
   }
 
-  // initialise
+  // Domain decomposition for MPI processes.
+  int rankLoad = (num / numProcesses) & (-8);               // Rounded down to nearest SIMD multiple
+  int lastRankLoad = num - rankLoad * (numProcesses-1);     // So last rank could have more.
+  int toSend = (rankNum == (numProcesses-1)) ? lastRankLoad : rankLoad;
+  int rankOffset = rankLoad * rankNum;
+  int rankLimit = (rankNum == (numProcesses-1)) ? num : (rankOffset + rankLoad);
+
+  // printf("\n-- I am rank %i and have\nrankLoad: %i\ntoSend: %i\nrankOffset :%i\nrankLimit: %i\n",
+  //       rankNum, rankLoad, toSend, rankOffset, rankLimit);
+
+  // Initialise on all nodes (computing will be faster than transfer).
   rc = init(mass, x, y, z, vx, vy, vz, gas, liquid, loss_rate, num);
   if (rc != 0) {
     printf("\n ERROR during init() - aborting\n");
@@ -98,11 +116,12 @@ int main(int argc, char* argv[]) {
   __m512d vec_liquid_mass = _mm512_set1_pd(liquid_mass);
   __m512d vec_totalMass = _mm512_set1_pd(0.0);
 
-  // Calculate mass & do a (+=) reduction into totalMass. First into an AVX3 vec, then into double.
-  for (i=0; i<num; i += 8) {
+  // Calculate mass & do a (+=) reduction into totalMass.
+  // First each MPI rank does AVX3 vec -> double. Then do MPI_REDUCE into one double.
+  for (i = rankOffset; i < rankLimit; i += 8) {
     // Load mass elements if i<num, else set to 0.
     __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
-    __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1); // OP: 1 is LT
+    __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(rankLimit), 1); // OP: 1 is LT
     __m512d vec_gas = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, gas + i);
     __m512d vec_liquid = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, liquid + i);
 
@@ -110,7 +129,7 @@ int main(int argc, char* argv[]) {
     // Will have 0 for elements i >= num.
     __m512d vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
                                        _mm512_mul_pd(vec_liquid, vec_liquid_mass));
-    vec_totalMass += vec_mass;
+    vec_totalMass = _mm512_add_pd(vec_totalMass, vec_mass);
     // Store back to mem.
     _mm512_mask_store_pd(mass + i, i_mask, vec_mass);
   }
@@ -118,10 +137,18 @@ int main(int argc, char* argv[]) {
 
   // Wait for threads to join and do AVX->double reduction on a single thread.
   totalMass = _mm512_reduce_add_pd(vec_totalMass);
-  systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
-  printf("Time 0. System energy=%g\n", systemEnergy);
+  double root_totalMass;
 
-  printf("Now to integrate for %d timesteps\n", timesteps);
+  MPI_Reduce(&totalMass, &root_totalMass, 1,    // for all local totalMass: totalMass += local totalMass
+             MPI_DOUBLE, MPI_SUM,               // it's a SUM(double, double) op
+             0, MPI_COMM_WORLD);                // receive to root process (rank=0)
+
+  if (rankNum == 0) {
+    systemEnergy = calc_system_energy(root_totalMass, vx, vy, vz, num);
+    printf("Time 0. System energy=%g\n", systemEnergy);
+
+    printf("Now to integrate for %d timesteps\n", timesteps);
+  }
 
   /*
      MAIN TIME STEPPING LOOP
@@ -152,139 +179,177 @@ int main(int argc, char* argv[]) {
 
   // time=0 was initial conditions
   for (time=1; time<=timesteps; time++) {
-      // LOOP1: take snapshot to use on RHS when looping for updates
-      for (i=0; i<num; i += 8) {
-          // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
-          __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
-          __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
 
-          // memcpy at 512-bit granularity
-          _mm512_mask_store_pd(old_x + i, i_mask,
-                               _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, x + i));
-          _mm512_mask_store_pd(old_y + i, i_mask,
-                               _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, y + i));
-          _mm512_mask_store_pd(old_z + i, i_mask,
-                               _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, z + i));
-          _mm512_mask_store_pd(old_mass + i, i_mask,
-                               _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i));
-      }
+    // Each rank sends their new values the old value buffers of all other ranks.
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Allgather(x + rankOffset, toSend, MPI_DOUBLE,
+                  old_x + rankOffset, toSend, MPI_DOUBLE, MPI_COMM_WORLD);
+    MPI_Allgather(y + rankOffset, toSend, MPI_DOUBLE,
+                  old_y + rankOffset, toSend, MPI_DOUBLE, MPI_COMM_WORLD);
+    MPI_Allgather(z + rankOffset, toSend, MPI_DOUBLE,
+                  old_z + rankOffset, toSend, MPI_DOUBLE, MPI_COMM_WORLD);
+    MPI_Allgather(mass + rankOffset, toSend, MPI_DOUBLE,
+                  old_mass + rankOffset, toSend, MPI_DOUBLE, MPI_COMM_WORLD);
 
-      // The exp func has to be done just once per timestep.
-      __m512d vec_exp_kT = _mm512_set1_pd(exp(-k*T));
-
-      // LOOP2: update position etc per particle (based on old data)
-      for(i=0; i<num; i += 8) {
-        __m512d vec_old_x, vec_old_y, vec_old_z, vec_old_mass;
-
+    // Don't forget to transfer withink each rank.
+    for(i=rankOffset; i<rankLimit; i += 8) {
         // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
         __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
         __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
 
-        // Load into AVX-512 registers. (only i<num elemenets are loaded, else the lane is set to 0.0).
-        __m512d vec_x = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, x + i);
-        __m512d vec_y = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, y + i);
-        __m512d vec_z = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, z + i);
-        __m512d vec_vx = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vx + i);
-        __m512d vec_vy = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vy + i);
-        __m512d vec_vz = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vz + i);
-        __m512d vec_mass = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i);
-        __m512d vec_gas = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, gas + i);
-        __m512d vec_loss_rate = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, loss_rate + i);
-        __m512d vec_liquid = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, liquid + i);
+        // memcpy at 512-bit granularity
+        _mm512_mask_store_pd(old_x + i, i_mask,
+                              _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, x + i));
+        _mm512_mask_store_pd(old_y + i, i_mask,
+                              _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, y + i));
+        _mm512_mask_store_pd(old_z + i, i_mask,
+                              _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, z + i));
+        _mm512_mask_store_pd(old_mass + i, i_mask,
+                              _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i));
+    }
 
-        // calc forces on body i due to particles (j != i)
-        for (j=0; j<num; j += 1) {
-          // if (i == j), then  don't set j writeback bit.
-          __m512i vec_j = _mm512_set1_epi64(j);
-          __mmask8 j_mask = _mm512_cmp_epi64_mask(vec_i, vec_j, 4); // 4: OP := _MM_CMPINT_NE
+    // The exp func has to be done just once per timestep.
+    __m512d vec_exp_kT = _mm512_set1_pd(exp(-k*T));
 
-          // Load into AVX-512 registers.
-          vec_old_x = _mm512_set1_pd(old_x[j]);
-          vec_old_y = _mm512_set1_pd(old_y[j]);
-          vec_old_z = _mm512_set1_pd(old_z[j]);
-          vec_old_mass = _mm512_set1_pd(old_mass[j]);
+    // LOOP2: update position etc per particle (based on old data)
+    // Each rank gets 'rankLoad' particles to compute.
+    for(i=rankOffset; i<rankLimit; i += 8) {
+      __m512d vec_old_x, vec_old_y, vec_old_z, vec_old_mass;
 
-          __m512d vec_dx = _mm512_sub_pd(vec_old_x, vec_x);
-          __m512d vec_dy = _mm512_sub_pd(vec_old_y, vec_y);
-          __m512d vec_dz = _mm512_sub_pd(vec_old_z, vec_z);
+      // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
+      __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+      __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(rankLimit), 1);
 
-          // The expression "a*a + b*b + c*c" can be done using 1 mul and 2 fma ops:
-          //  fma(a, a, fma(b, b, mul(c, c))
-          __m512d vec_temp_d = _mm512_max_pd(_mm512_fmadd_pd(vec_dz, vec_dz,
-                                                      _mm512_fmadd_pd(vec_dy, vec_dy,
-                                                      _mm512_mul_pd(vec_dx, vec_dx))),
-                                             _mm512_set1_pd(0.0001));
-          __m512d vec_d = _mm512_sqrt_pd(vec_temp_d);
+      // Load into AVX-512 registers. (only i<num elemenets are loaded, else the lane is set to 0.0).
+      __m512d vec_x = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, x + i);
+      __m512d vec_y = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, y + i);
+      __m512d vec_z = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, z + i);
+      __m512d vec_vx = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vx + i);
+      __m512d vec_vy = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vy + i);
+      __m512d vec_vz = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vz + i);
+      __m512d vec_mass = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i);
+      __m512d vec_gas = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, gas + i);
+      __m512d vec_loss_rate = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, loss_rate + i);
+      __m512d vec_liquid = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, liquid + i);
 
-          // Note: mass is not factored in, since when calculating ax, ay, az we do F/mass.
-          //       The same goes for d*d. Since it is sqrt'ed later, we don't have to multiply here.
-          __m512d vec_F = _mm512_div_pd(_mm512_mul_pd(vec_old_mass, vec_GRAVCONST), vec_temp_d);
+      // calc forces on body i due to particles (j != i)
+      for (j=0; j<num; j += 1) {
+        // if (i == j), then  don't set j writeback bit.
+        __m512i vec_j = _mm512_set1_epi64(j);
+        __mmask8 j_mask = _mm512_cmp_epi64_mask(vec_i, vec_j, 4); // 4: OP := _MM_CMPINT_NE
 
-          // calculate acceleration due to the force, F and add to velocities
-          // (approximate velocities in "unit time")
-          // Note: elements where (i==j) or (j>num) are not written back thanks to using a mask.
-          vec_vx = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dx, vec_d), vec_vx, j_mask);
-          vec_vy = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dy, vec_d), vec_vy, j_mask);
-          vec_vz = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dz, vec_d), vec_vz, j_mask);
-        }
+        // Load into AVX-512 registers.
+        vec_old_x = _mm512_set1_pd(old_x[j]);
+        vec_old_y = _mm512_set1_pd(old_y[j]);
+        vec_old_z = _mm512_set1_pd(old_z[j]);
+        vec_old_mass = _mm512_set1_pd(old_mass[j]);
 
-        vec_old_x = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, old_x + i);
-        vec_old_y = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, old_y + i);
-        vec_old_z = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, old_z + i);
-        vec_old_mass = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, old_mass + i);
+        __m512d vec_dx = _mm512_sub_pd(vec_old_x, vec_x);
+        __m512d vec_dy = _mm512_sub_pd(vec_old_y, vec_y);
+        __m512d vec_dz = _mm512_sub_pd(vec_old_z, vec_z);
 
-        // calc new position
-        // Note: elements where i>num, are not written back thanks to using a mask.
-        vec_x = _mm512_add_pd(vec_old_x, vec_vx); _mm512_mask_store_pd(x + i, i_mask, vec_x);
-        vec_y = _mm512_add_pd(vec_old_y, vec_vy); _mm512_mask_store_pd(y + i, i_mask, vec_y);
-        vec_z = _mm512_add_pd(vec_old_z, vec_vz); _mm512_mask_store_pd(z + i, i_mask, vec_z);
+        // The expression "a*a + b*b + c*c" can be done using 1 mul and 2 fma ops:
+        //  fma(a, a, fma(b, b, mul(c, c))
+        __m512d vec_temp_d = _mm512_max_pd(_mm512_fmadd_pd(vec_dz, vec_dz,
+                                                    _mm512_fmadd_pd(vec_dy, vec_dy,
+                                                    _mm512_mul_pd(vec_dx, vec_dx))),
+                                            _mm512_set1_pd(0.0001));
+        __m512d vec_d = _mm512_sqrt_pd(vec_temp_d);
 
-        // temp-dependent condensation from gas to liquid
-        vec_gas = _mm512_mul_pd(vec_gas, _mm512_mul_pd(vec_loss_rate, vec_exp_kT));
-        vec_liquid = _mm512_sub_pd(_mm512_set1_pd(1.0), vec_gas);
-        vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
-                                   _mm512_mul_pd(vec_liquid, vec_liquid_mass));
-        // Store gas, liquid and mass
-        _mm512_mask_store_pd(gas + i, i_mask, vec_gas);
-        _mm512_mask_store_pd(liquid + i, i_mask, vec_liquid);
-        _mm512_mask_store_pd(mass + i, i_mask, vec_mass);
+        // Note: mass is not factored in, since when calculating ax, ay, az we do F/mass.
+        //       The same goes for d*d. Since it is sqrt'ed later, we don't have to multiply here.
+        __m512d vec_F = _mm512_div_pd(_mm512_mul_pd(vec_old_mass, vec_GRAVCONST), vec_temp_d);
 
-        // "sqrt(old_mass * v_squared / mass) / sqrt(v_squared)"" can be simpliefied to:
-        // "sqrt(old_mass / mass)", if numbers rooted are >0 (guranteed for mass & velocities).
-        __m512d factor = _mm512_sqrt_pd(_mm512_div_pd(vec_old_mass, vec_mass));
-
-        vec_vx = _mm512_mul_pd(factor, vec_vx);
-        vec_vy = _mm512_mul_pd(factor, vec_vy);
-        vec_vz = _mm512_mul_pd(factor, vec_vz);
-
-        // Store vx, vy, vz
-        _mm512_mask_store_pd(vx + i, i_mask, vec_vx);
-        _mm512_mask_store_pd(vy + i, i_mask, vec_vy);
-        _mm512_mask_store_pd(vz + i, i_mask, vec_vz);
-
-      } // end of LOOP 2
-      //    output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
-
-      // Do a sum-reduce. First into AVX vector (custom recution declaration), then into double.
-      vec_totalMass = _mm512_set1_pd(0.0);
-      for (i=0; i<num; i += 8) {
-        __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
-        __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(num), 1);
-        // Load mass elements if i<num, else set to 0.
-        __m512d this_vec_mass = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i);
-
-        vec_totalMass = _mm512_add_pd(vec_totalMass, this_vec_mass);
+        // calculate acceleration due to the force, F and add to velocities
+        // (approximate velocities in "unit time")
+        // Note: elements where (i==j) or (j>num) are not written back thanks to using a mask.
+        vec_vx = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dx, vec_d), vec_vx, j_mask);
+        vec_vy = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dy, vec_d), vec_vy, j_mask);
+        vec_vz = _mm512_mask3_fmadd_pd(vec_F, _mm512_div_pd(vec_dz, vec_d), vec_vz, j_mask);
       }
 
-      // AVX vector -> double reduction.
-      totalMass = _mm512_reduce_add_pd(vec_totalMass);
-      systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
-      printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n", time, T, systemEnergy, totalMass);
-      // temperature drops per timestep
-      T *= 0.99999;
+      vec_old_x = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, old_x + i);
+      vec_old_y = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, old_y + i);
+      vec_old_z = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, old_z + i);
+      vec_old_mass = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, old_mass + i);
 
-      // join threads before next timestep
+      // calc new position
+      // Note: elements where i>num, are not written back thanks to using a mask.
+      vec_x = _mm512_add_pd(vec_old_x, vec_vx); _mm512_mask_store_pd(x + i, i_mask, vec_x);
+      vec_y = _mm512_add_pd(vec_old_y, vec_vy); _mm512_mask_store_pd(y + i, i_mask, vec_y);
+      vec_z = _mm512_add_pd(vec_old_z, vec_vz); _mm512_mask_store_pd(z + i, i_mask, vec_z);
+
+      // temp-dependent condensation from gas to liquid
+      vec_gas = _mm512_mul_pd(vec_gas, _mm512_mul_pd(vec_loss_rate, vec_exp_kT));
+      vec_liquid = _mm512_sub_pd(_mm512_set1_pd(1.0), vec_gas);
+      vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
+                                  _mm512_mul_pd(vec_liquid, vec_liquid_mass));
+      // Store gas, liquid and mass
+      _mm512_mask_store_pd(gas + i, i_mask, vec_gas);
+      _mm512_mask_store_pd(liquid + i, i_mask, vec_liquid);
+      _mm512_mask_store_pd(mass + i, i_mask, vec_mass);
+
+      // "sqrt(old_mass * v_squared / mass) / sqrt(v_squared)"" can be simpliefied to:
+      // "sqrt(old_mass / mass)", if numbers rooted are >0 (guranteed for mass & velocities).
+      __m512d factor = _mm512_sqrt_pd(_mm512_div_pd(vec_old_mass, vec_mass));
+
+      vec_vx = _mm512_mul_pd(factor, vec_vx);
+      vec_vy = _mm512_mul_pd(factor, vec_vy);
+      vec_vz = _mm512_mul_pd(factor, vec_vz);
+
+      // Store vx, vy, vz
+      _mm512_mask_store_pd(vx + i, i_mask, vec_vx);
+      _mm512_mask_store_pd(vy + i, i_mask, vec_vy);
+      _mm512_mask_store_pd(vz + i, i_mask, vec_vz);
+
+    } // end of LOOP 2
+      //    output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
+
+    // Do a sum-reduce.
+    // First each MPI rank does AVX3 vec -> double. Then do MPI_REDUCE into one double.
+    for (i = rankOffset; i < rankLimit; i += 8) {
+      // Load mass elements if i<num, else set to 0.
+      __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
+      __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(rankLimit), 1); // OP: 1 is LT
+      __m512d vec_gas = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, gas + i);
+      __m512d vec_liquid = _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, liquid + i);
+
+      // mass[i] = gas[i]*gas_mass + liquid[i]*liquid_mass;
+      // Will have 0 for elements i >= num.
+      __m512d vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
+                                        _mm512_mul_pd(vec_liquid, vec_liquid_mass));
+      vec_totalMass = _mm512_add_pd(vec_totalMass, vec_mass);
+      // Store back to mem.
+      _mm512_mask_store_pd(mass + i, i_mask, vec_mass);
+    }
+
+    totalMass = _mm512_reduce_add_pd(vec_totalMass);
+    double root_totalMass;
+
+    MPI_Reduce(&totalMass, &root_totalMass, 1,    // for all local totalMass: totalMass += local totalMass
+               MPI_DOUBLE, MPI_SUM,               // it's a SUM(double, double) op
+               0, MPI_COMM_WORLD);                // receive to root process (rank=0)
+
+    // Gather velocities into root.
+    MPI_Gather(vx + rankOffset, toSend, MPI_DOUBLE,
+               vx + rankOffset, toSend, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(vy + rankOffset, toSend, MPI_DOUBLE,
+               vy + rankOffset, toSend, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(vz + rankOffset, toSend, MPI_DOUBLE,
+               vz + rankOffset, toSend, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    // Root calculates system energy.
+    if (rankNum == 0) {
+      systemEnergy = calc_system_energy(root_totalMass, vx, vy, vz, num);
+      printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n",
+              time, T, systemEnergy, totalMass);
+    }
+
+    // temperature drops per timestep
+    T *= 0.99999;
   } // time steps
+
+  MPI_Finalize();
 
   printf("Time to init+solve %d molecules for %d timesteps is %g seconds\n", num, timesteps, omp_get_wtime()-start);
 
