@@ -132,6 +132,7 @@ int main(int argc, char* argv[]) {
   {
     totalMass = _mm512_reduce_add_pd(vec_totalMass);
     systemEnergy = calc_system_energy(totalMass, vx, vy, vz, num);
+    printf("Time 0. Total mass=%g\n", totalMass);
     printf("Time 0. System energy=%g\n", systemEnergy);
 
     printf("Now to integrate for %d timesteps\n", timesteps);
@@ -259,8 +260,7 @@ int main(int argc, char* argv[]) {
         // temp-dependent condensation from gas to liquid
         vec_gas = _mm512_mul_pd(vec_gas, _mm512_mul_pd(vec_loss_rate, vec_exp_kT));
         vec_liquid = _mm512_sub_pd(_mm512_set1_pd(1.0), vec_gas);
-        vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass,
-                                   _mm512_mul_pd(vec_liquid, vec_liquid_mass));
+        vec_mass = _mm512_fmadd_pd(vec_gas, vec_gas_mass, _mm512_mul_pd(vec_liquid, vec_liquid_mass));
         // Store gas, liquid and mass
         _mm512_mask_store_pd(gas + i, i_mask, vec_gas);
         _mm512_mask_store_pd(liquid + i, i_mask, vec_liquid);

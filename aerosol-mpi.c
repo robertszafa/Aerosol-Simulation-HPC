@@ -33,13 +33,13 @@ void calc_centre_mass(double*, double*, double*, double*, double*, double, int);
 
 void swap_ptr(double**, double**);
 
+int numRanks, rankId, rankSimdLoad, lastRankLoad, toSend, rankOffset, rankLimit;
 
 int main(int argc, char* argv[]) {
 
   MPI_Init(NULL, NULL);
-  int numProcesses, rankNum;
-  MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
-  MPI_Comm_rank(MPI_COMM_WORLD, &rankNum);
+  MPI_Comm_size(MPI_COMM_WORLD, &numRanks);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rankId);
 
   int i, j;
   int num;     // user defined (argv[1]) total number of gas molecules in simulation
@@ -55,7 +55,7 @@ int main(int argc, char* argv[]) {
   int *counts, *displacements; // for MPI variable collective comms.
 
   double start;
-  if (rankNum == 0)
+  if (rankId == 0)
     start=omp_get_wtime();   // we make use of the simple wall clock timer available in OpenMP
 
   /* if avail, input size of system */
@@ -68,7 +68,7 @@ int main(int argc, char* argv[]) {
     timesteps = 50;
   }
 
-  if (rankNum == 0)
+  if (rankId == 0)
     printf("Initializing for %d particles in x,y,z space...", num);
 
   /* malloc arrays and pass ref to init(). NOTE: init() uses random numbers */
@@ -86,10 +86,10 @@ int main(int argc, char* argv[]) {
   old_y = (double *) malloc(num * sizeof(double));
   old_z = (double *) malloc(num * sizeof(double));
   old_mass = (double *) malloc(num * sizeof(double));
-  counts = (int *) malloc(numProcesses * sizeof(int));
-  displacements = (int *) malloc(numProcesses * sizeof(int));
+  counts = (int *) malloc(numRanks * sizeof(int));
+  displacements = (int *) malloc(numRanks * sizeof(int));
 
-  if (rankNum == 0)
+  if (rankId == 0)
   {
     // should check all rc but let's just see if last malloc worked
     if (old_mass == NULL) {
@@ -102,19 +102,23 @@ int main(int argc, char* argv[]) {
   }
 
   // Domain decomposition for MPI processes.
-  int rankLoad = (num / numProcesses) & (-8);               // Rounded down to nearest SIMD multiple
-  int lastRankLoad = num - rankLoad * (numProcesses-1);     // So last rank could have more.
-  int toSend = (rankNum == (numProcesses-1)) ? lastRankLoad : rankLoad;
-  int rankOffset = rankLoad * rankNum;
-  int rankLimit = (rankNum == (numProcesses-1)) ? num : (rankOffset + rankLoad);
-  for (i=0; i<numProcesses-1; ++i) counts[i] = rankLoad;
-  counts[numProcesses - 1] = lastRankLoad;
-  for (i=0; i<numProcesses; ++i) displacements[i] = rankLoad * i;
+  // Each rank (but last) gets the nearest SIMD multiple of work to do.
+  int rankSimdLoad = (num / numRanks) & (-8);
+  // Last rank will have more if not perfect SIMD multiple.
+  int lastRankLoad = num - rankSimdLoad * (numRanks-1);
+  int toSend = (rankId == (numRanks-1)) ? lastRankLoad : rankSimdLoad;
+  // Each rank gets the interval [rankOffset, rankLimit) of particles to compute.
+  int rankOffset = rankSimdLoad * rankId;
+  int rankLimit = (rankId == (numRanks-1)) ? num : (rankOffset + rankSimdLoad);
+  // Counts and displacement arrays used for varaible sized comms.
+  for (i=0; i<numRanks-1; ++i) counts[i] = rankSimdLoad;
+  counts[numRanks - 1] = lastRankLoad;
+  for (i=0; i<numRanks; ++i) displacements[i] = rankSimdLoad * i;
 
   // Initialise on all nodes (computing will be faster than transfer).
   rc = init(mass, x, y, z, vx, vy, vz, gas, liquid, loss_rate, num);
 
-  if (rankNum == 0) {
+  if (rankId == 0) {
     if (rc != 0) {
       printf("\n ERROR during init() - aborting\n");
       return -99;
@@ -131,7 +135,7 @@ int main(int argc, char* argv[]) {
   __m512d vec_totalMass = _mm512_set1_pd(0.0);
 
   // Calculate mass & do a (+=) reduction into totalMass.
-  // Each rank gets 'rankLoad' particles to compute.
+  // Each rank gets the interval [rankOffset, rankLimit) of particles to compute.
   // First each MPI rank does AVX3 vec -> double. Then do MPI_REDUCE into one double.
   for (i = rankOffset; i < rankLimit; i += 8) {
     // Load mass elements if i<num, else set to 0.
@@ -159,7 +163,7 @@ int main(int argc, char* argv[]) {
              MPI_DOUBLE, MPI_SUM,               // it's a SUM(double, double) op
              0, MPI_COMM_WORLD);                // receive to root process (rank=0)
 
-  if (rankNum == 0) {
+  if (rankId == 0) {
     systemEnergy = calc_system_energy(root_totalMass, vx, vy, vz, num);
     printf("Time 0. Total mass=%g\n", root_totalMass);
     printf("Time 0. System energy=%g\n", systemEnergy);
@@ -211,7 +215,7 @@ int main(int argc, char* argv[]) {
     __m512d vec_exp_kT = _mm512_set1_pd(exp(-k*T));
 
     // LOOP2: update position etc per particle (based on old data)
-    // Each rank gets 'rankLoad' particles to compute.
+    // Each rank gets the interval [rankOffset, rankLimit) of particles to compute.
     for(i=rankOffset; i<rankLimit; i += 8) {
       __m512d vec_old_x, vec_old_y, vec_old_z, vec_old_mass;
 
@@ -338,7 +342,7 @@ int main(int argc, char* argv[]) {
                old_z, counts, displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
     // Root calculates system energy, and prints statistics.
-    if (rankNum == 0) {
+    if (rankId == 0) {
       swap_ptr(&vx, &old_x); swap_ptr(&vy, &old_y); swap_ptr(&vz, &old_z);
       systemEnergy = calc_system_energy(root_totalMass, vx, vy, vz, num);
       printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n",
@@ -362,7 +366,7 @@ int main(int argc, char* argv[]) {
               old_mass, counts, displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
   swap_ptr(&x, &old_x); swap_ptr(&y, &old_y); swap_ptr(&z, &old_z); swap_ptr(&mass, &old_mass);
 
-  if (rankNum == 0)
+  if (rankId == 0)
   {
     printf("Time to init+solve %d molecules for %d timesteps is %g seconds\n",
            num, timesteps, omp_get_wtime()-start);

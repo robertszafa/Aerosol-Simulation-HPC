@@ -10,7 +10,8 @@
 
 
 # Specific course queue and max wallclock time
-#SBATCH -p course -n 1 --exclusive -t 5
+#SBATCH -p course -n 1 -t 3
+## --exclusive
 
 # Defaults on Barkla (but set to be safe)
 ## Specify the current working directory as the location for executables/files
@@ -37,15 +38,12 @@ NUM_TIME_STEPS=50 && (( $# > 2 )) && NUM_TIME_STEPS=$3
 EXE=${SRC%%.c}.exe
 rm -f ${EXE}
 echo compiling $SRC to $EXE
-export numMPI=${SLURM_CPUS_PER_TASK:-1} # if '-c' not used then default to 1
+export numMPI=${SLURM_CPUS_PER_TASK:-3} # if '-c' not used then default to 1
 export maxNumMPI=40
 
 echo compiling for $numMPI MPI processes
 
-# mpiicc -O0 func2.c  mpi_quad.c -o $EXE && \
-# mpiicc -O0 func2.c  mpi_quad-GATHER.c -o $EXE && \
-icc  -O0
-mpiicc -qopenmp -O0 $SRC -o $EXE && \
+mpiicc -qopenmp -O0 $SRC -o $EXE
 
 if test -x $EXE; then
       # set number of threads
