@@ -111,14 +111,10 @@ int main(int argc, char* argv[]) {
   counts[numProcesses - 1] = lastRankLoad;
   for (i=0; i<numProcesses; ++i) displacements[i] = rankLoad * i;
 
-  // printf("\n-- I am rank %i and have\nrankLoad: %i\ntoSend: %i\nrankOffset :%i\nrankLimit: %i\n",
-  //       rankNum, rankLoad, toSend, rankOffset, rankLimit);
-
   // Initialise on all nodes (computing will be faster than transfer).
   rc = init(mass, x, y, z, vx, vy, vz, gas, liquid, loss_rate, num);
 
-  if (rankNum == 0)
-  {
+  if (rankNum == 0) {
     if (rc != 0) {
       printf("\n ERROR during init() - aborting\n");
       return -99;
@@ -135,6 +131,7 @@ int main(int argc, char* argv[]) {
   __m512d vec_totalMass = _mm512_set1_pd(0.0);
 
   // Calculate mass & do a (+=) reduction into totalMass.
+  // Each rank gets 'rankLoad' particles to compute.
   // First each MPI rank does AVX3 vec -> double. Then do MPI_REDUCE into one double.
   for (i = rankOffset; i < rankLimit; i += 8) {
     // Load mass elements if i<num, else set to 0.
@@ -151,7 +148,6 @@ int main(int argc, char* argv[]) {
     // Store back to mem.
     _mm512_mask_store_pd(mass + i, i_mask, vec_mass);
   }
-    //DEBUG  output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
 
   // Wait for threads to join and do AVX->double reduction on a single thread.
   totalMass = _mm512_reduce_add_pd(vec_totalMass);
@@ -200,16 +196,7 @@ int main(int argc, char* argv[]) {
 
   // time=0 was initial conditions
   for (time=1; time<=timesteps; time++) {
-
-    // printf("i is = %i\n", i);
-    // printf("rankOffset is = %i\n", rankOffset);
-    // printf("rankLimit is = %i\n", rankLimit);
-    // printf("rankLoad is = %i\n", rankLoad);
-    // printf("lastRankLoad is = %i\n", lastRankLoad);
-    // printf("displacements[0] is = %i\n", displacements[0]);
-    // printf("counts[0] is = %i\n", counts[0]);
-
-    // Each rank has to have all values from the last timestep.
+    // Each rank has to have all x, y, z and mass values from the last timestep.
     MPI_Barrier(MPI_COMM_WORLD);
     MPI_Allgatherv(x + rankOffset, toSend, MPI_DOUBLE,
                    old_x, counts, displacements, MPI_DOUBLE, MPI_COMM_WORLD);
@@ -219,32 +206,6 @@ int main(int argc, char* argv[]) {
                    old_z, counts, displacements, MPI_DOUBLE, MPI_COMM_WORLD);
     MPI_Allgatherv(mass + rankOffset, toSend, MPI_DOUBLE,
                    old_mass, counts, displacements, MPI_DOUBLE, MPI_COMM_WORLD);
-
-    // Don't forget to transfer within each rank.
-    for(i=rankOffset; i<rankLimit; i += 8) {
-        // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
-        __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
-        __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(rankLimit), 1);
-
-        // memcpy at 512-bit granularity
-        _mm512_mask_store_pd(old_x + i, i_mask,
-                             _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, x + i));
-        _mm512_mask_store_pd(old_y + i, i_mask,
-                             _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, y + i));
-        _mm512_mask_store_pd(old_z + i, i_mask,
-                             _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, z + i));
-        _mm512_mask_store_pd(old_mass + i, i_mask,
-                             _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i));
-    }
-
-  //   int t;
-  //   for (t=0; t<numProcesses; t++) {
-  // for (i=0; i<num; i++) {
-  //     if (t == rankNum)
-  //       printf("Rank %i item %i:\t %f %f %f %f\n", rankNum, i, old_x[i], old_y[i], old_z[i], old_mass[i]);
-  //   }
-  //     MPI_Barrier(MPI_COMM_WORLD);
-    // }
 
     // The exp func has to be done just once per timestep.
     __m512d vec_exp_kT = _mm512_set1_pd(exp(-k*T));
@@ -340,9 +301,8 @@ int main(int argc, char* argv[]) {
       _mm512_mask_store_pd(vz + i, i_mask, vec_vz);
 
     } // end of LOOP 2
-      //    output_particles(x,y,z, vx,vy,vz, gas, liquid, num);
 
-    // Do a sum-reduce.
+    // Do a (+) reduction into totalMass.
     // First each MPI rank does AVX3 vec -> double. Then do MPI_REDUCE into one double.
     vec_totalMass = _mm512_set1_pd(0.0);
     for (i = rankOffset; i < rankLimit; i += 8) {
@@ -360,7 +320,6 @@ int main(int argc, char* argv[]) {
       // Store back to mem.
       _mm512_mask_store_pd(mass + i, i_mask, vec_mass);
     }
-
     totalMass = _mm512_reduce_add_pd(vec_totalMass);
     root_totalMass = 0;
     MPI_Barrier(MPI_COMM_WORLD);
@@ -370,41 +329,17 @@ int main(int argc, char* argv[]) {
 
     // Gather velocities into root.
     // In gatherv, the send and receive buffers cannot alias (there is no IN_PLACE flag for gatherv).
-    // We reuse old_* buffers here and swap pointers later.
+    // We reuse old_* buffers here and swap pointers in root later.
     MPI_Gatherv(vx + rankOffset, toSend, MPI_DOUBLE,
                 old_x, counts, displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Gatherv(vy + rankOffset, toSend, MPI_DOUBLE,
                 old_y, counts, displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Gatherv(vz + rankOffset, toSend, MPI_DOUBLE,
                old_z, counts, displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    swap_ptr(&vx, &old_x); swap_ptr(&vy, &old_y); swap_ptr(&vz, &old_z);
 
-    // int ii;
-    // for (ii=0;ii<num;++ii)
-    // {
-    //   printf("vx[%i] = %g\n", ii, vx[ii]);
-    //   printf("vy[%i] = %g\n", ii, vy[ii]);
-    //   printf("vz[%i] = %g\n", ii, vz[ii]);
-    // }
-    // printf("Total mass = %g\n", root_totalMass);
-    // printf("Total mass = %g\n", totalMass);
-
-    // // Root calculates system energy.
+    // Root calculates system energy, and prints statistics.
     if (rankNum == 0) {
-      // Root has to transfer v* to old_* as well, before swapping pointers.
-      // for(i=rankOffset; i<rankLimit; i += 8) {
-      //     // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
-      //     __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
-      //     __mmask8 i_mask = _mm512_cmp_epi64_mask(vec_i, _mm512_set1_epi64(rankLimit), 1);
-
-      //     // memcpy at 512-bit granularity
-      //     _mm512_mask_store_pd(old_x + i, i_mask,
-      //                         _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vx + i));
-      //     _mm512_mask_store_pd(old_y + i, i_mask,
-      //                         _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vy + i));
-      //     _mm512_mask_store_pd(old_z + i, i_mask,
-      //                         _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, vz + i));
-      // }
+      swap_ptr(&vx, &old_x); swap_ptr(&vy, &old_y); swap_ptr(&vz, &old_z);
       systemEnergy = calc_system_energy(root_totalMass, vx, vy, vz, num);
       printf("At end of timestep %d with temp %f the system energy=%g and total aerosol mass=%g\n",
               time, T, systemEnergy, root_totalMass);
@@ -414,7 +349,9 @@ int main(int argc, char* argv[]) {
     T *= 0.99999;
   } // time steps
 
-    MPI_Barrier(MPI_COMM_WORLD);
+
+  // In gatherv, the send and receive buffers cannot alias (there is no IN_PLACE flag for gatherv).
+  // We reuse old_* buffers here and swap pointers in root later.
   MPI_Gatherv(x + rankOffset, toSend, MPI_DOUBLE,
               old_x, counts, displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
   MPI_Gatherv(y + rankOffset, toSend, MPI_DOUBLE,
@@ -423,7 +360,6 @@ int main(int argc, char* argv[]) {
               old_z, counts, displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
   MPI_Gatherv(mass + rankOffset, toSend, MPI_DOUBLE,
               old_mass, counts, displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
   swap_ptr(&x, &old_x); swap_ptr(&y, &old_y); swap_ptr(&z, &old_z); swap_ptr(&mass, &old_mass);
 
   if (rankNum == 0)
@@ -551,8 +487,7 @@ void calc_centre_mass(double *com, double *x, double *y, double *z, double *mass
 }
 
 // Swap two pointers.
-void swap_ptr(double **a, double **b)
-{
+void swap_ptr(double **a, double **b) {
   double *tmp;
   tmp = *b; *b = *a; *a = tmp;
 }
