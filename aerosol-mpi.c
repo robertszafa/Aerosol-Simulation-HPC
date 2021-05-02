@@ -63,7 +63,8 @@ int main(int argc, char* argv[]) {
     timesteps = 50;
   }
 
-  printf("Initializing for %d particles in x,y,z space...", num);
+  if (rankNum == 0)
+    printf("Initializing for %d particles in x,y,z space...", num);
 
   /* malloc arrays and pass ref to init(). NOTE: init() uses random numbers */
   mass = (double *) malloc(num * sizeof(double));
@@ -81,13 +82,16 @@ int main(int argc, char* argv[]) {
   old_z = (double *) malloc(num * sizeof(double));
   old_mass = (double *) malloc(num * sizeof(double));
 
-  // should check all rc but let's just see if last malloc worked
-  if (old_mass == NULL) {
-    printf("\n ERROR in malloc for (at least) old_mass - aborting\n");
-    return -99;
-  }
-  else {
-    printf("  (malloc-ed)  ");
+  if (rankNum == 0)
+  {
+    // should check all rc but let's just see if last malloc worked
+    if (old_mass == NULL) {
+      printf("\n ERROR in malloc for (at least) old_mass - aborting\n");
+      return -99;
+    }
+    else {
+      printf("  (malloc-ed)  ");
+    }
   }
 
   // Domain decomposition for MPI processes.
@@ -96,18 +100,27 @@ int main(int argc, char* argv[]) {
   int toSend = (rankNum == (numProcesses-1)) ? lastRankLoad : rankLoad;
   int rankOffset = rankLoad * rankNum;
   int rankLimit = (rankNum == (numProcesses-1)) ? num : (rankOffset + rankLoad);
+  int *counts = (int *) malloc(numProcesses * sizeof(int));
+  for (i=0; i<numProcesses-1; ++i) counts[i] = rankLoad;
+  counts[numProcesses - 1] = lastRankLoad;
+  int *displacements = (int *) malloc(numProcesses * sizeof(int));
+  for (i=0; i<numProcesses; ++i) displacements[i] = rankLoad * i;
 
   // printf("\n-- I am rank %i and have\nrankLoad: %i\ntoSend: %i\nrankOffset :%i\nrankLimit: %i\n",
   //       rankNum, rankLoad, toSend, rankOffset, rankLimit);
 
   // Initialise on all nodes (computing will be faster than transfer).
   rc = init(mass, x, y, z, vx, vy, vz, gas, liquid, loss_rate, num);
-  if (rc != 0) {
-    printf("\n ERROR during init() - aborting\n");
-    return -99;
-  }
-  else {
-    printf("  INIT COMPLETE\n");
+
+  if (rankNum == 0)
+  {
+    if (rc != 0) {
+      printf("\n ERROR during init() - aborting\n");
+      return -99;
+    }
+    else {
+      printf("  INIT COMPLETE\n");
+    }
   }
 
   // Expand constants into AVX-512 form.
@@ -139,12 +152,14 @@ int main(int argc, char* argv[]) {
   totalMass = _mm512_reduce_add_pd(vec_totalMass);
   double root_totalMass;
 
+  MPI_Barrier(MPI_COMM_WORLD);
   MPI_Reduce(&totalMass, &root_totalMass, 1,    // for all local totalMass: totalMass += local totalMass
              MPI_DOUBLE, MPI_SUM,               // it's a SUM(double, double) op
              0, MPI_COMM_WORLD);                // receive to root process (rank=0)
 
   if (rankNum == 0) {
     systemEnergy = calc_system_energy(root_totalMass, vx, vy, vz, num);
+    printf("Time 0. Total mass=%g\n", root_totalMass);
     printf("Time 0. System energy=%g\n", systemEnergy);
 
     printf("Now to integrate for %d timesteps\n", timesteps);
@@ -180,18 +195,19 @@ int main(int argc, char* argv[]) {
   // time=0 was initial conditions
   for (time=1; time<=timesteps; time++) {
 
-    // Each rank sends their new values the old value buffers of all other ranks.
+    // Each rank has to have all values from the last timestep.
+    rankOffset = rankLoad * rankNum;
     MPI_Barrier(MPI_COMM_WORLD);
-    MPI_Allgather(x + rankOffset, toSend, MPI_DOUBLE,
-                  old_x + rankOffset, toSend, MPI_DOUBLE, MPI_COMM_WORLD);
-    MPI_Allgather(y + rankOffset, toSend, MPI_DOUBLE,
-                  old_y + rankOffset, toSend, MPI_DOUBLE, MPI_COMM_WORLD);
-    MPI_Allgather(z + rankOffset, toSend, MPI_DOUBLE,
-                  old_z + rankOffset, toSend, MPI_DOUBLE, MPI_COMM_WORLD);
-    MPI_Allgather(mass + rankOffset, toSend, MPI_DOUBLE,
-                  old_mass + rankOffset, toSend, MPI_DOUBLE, MPI_COMM_WORLD);
+    MPI_Allgatherv(x + rankOffset, toSend, MPI_DOUBLE,
+                  old_x, counts, displacements, MPI_DOUBLE, MPI_COMM_WORLD);
+    MPI_Allgatherv(y + rankOffset, toSend, MPI_DOUBLE,
+                  old_y, counts, displacements, MPI_DOUBLE, MPI_COMM_WORLD);
+    MPI_Allgatherv(z + rankOffset, toSend, MPI_DOUBLE,
+                  old_z, counts, displacements, MPI_DOUBLE, MPI_COMM_WORLD);
+    MPI_Allgatherv(mass + rankOffset, toSend, MPI_DOUBLE,
+                  old_mass, counts, displacements, MPI_DOUBLE, MPI_COMM_WORLD);
 
-    // Don't forget to transfer withink each rank.
+    // Don't forget to transfer within each rank.
     for(i=rankOffset; i<rankLimit; i += 8) {
         // Set i_mask back for element i, if i<num. (1: OP := _MM_CMPINT_LT)
         __m512i vec_i = _mm512_setr_epi64(i, i+1, i+2, i+3, i+4, i+5, i+6, i+7);
@@ -207,6 +223,15 @@ int main(int argc, char* argv[]) {
         _mm512_mask_store_pd(old_mass + i, i_mask,
                               _mm512_mask_load_pd(_mm512_set1_pd(0.0), i_mask, mass + i));
     }
+
+  //   int t;
+  //   for (t=0; t<numProcesses; t++) {
+  // for (i=0; i<num; i++) {
+  //     if (t == rankNum)
+  //       printf("Rank %i item %i:\t %f %f %f %f\n", rankNum, i, old_x[i], old_y[i], old_z[i], old_mass[i]);
+  //   }
+  //     MPI_Barrier(MPI_COMM_WORLD);
+  // }
 
     // The exp func has to be done just once per timestep.
     __m512d vec_exp_kT = _mm512_set1_pd(exp(-k*T));
