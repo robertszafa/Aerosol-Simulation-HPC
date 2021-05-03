@@ -9,9 +9,9 @@
 ### Slight modifications for COMP328 programming assignment by Robert Szafarczyk, April 2021
 
 
-# Specific course queue and max wallclock time
-#SBATCH -p course -n 1 -t 3
-## --exclusive
+# Specific course queue and max wallclock time (uncomment --exclusive for timing)
+#SBATCH -p course -n 1 -t 5
+##--exclusive
 
 # Defaults on Barkla (but set to be safe)
 ## Specify the current working directory as the location for executables/files
@@ -38,7 +38,7 @@ NUM_TIME_STEPS=50 && (( $# > 2 )) && NUM_TIME_STEPS=$3
 EXE=${SRC%%.c}.exe
 rm -f ${EXE}
 echo compiling $SRC to $EXE
-export numMPI=${SLURM_CPUS_PER_TASK:-3} # if '-c' not used then default to 1
+export numMPI=${SLURM_CPUS_PER_TASK:-1} # if '-c' not used then default to 1
 export maxNumMPI=40
 
 echo compiling for $numMPI MPI processes
@@ -49,9 +49,10 @@ if test -x $EXE; then
       # set number of threads
       export OMP_NUM_THREADS=1
 
+      # run 3 times
       mpirun -np ${numMPI} ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
-    #   mpirun -np ${numMPI} ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
-    #   mpirun -np ${numMPI} ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
+      mpirun -np ${numMPI} ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
+      mpirun -np ${numMPI} ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
 else
      echo $SRC did not built to $EXE
 fi

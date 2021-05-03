@@ -9,7 +9,7 @@
 ### Slight modifications for COMP328 programming assignment by Robert Szafarczyk, April 2021
 
 
-# Specific course queue
+# Specific course queue and max wallclock time (uncomment --exclusive for timing)
 #SBATCH -p course -n 1 -t 5
 ##--exclusive
 
@@ -52,7 +52,8 @@ if test -x $EXE; then
       # set number of threads
       export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1} # if '-c' not used then default to 1
       echo using ${OMP_NUM_THREADS} OpenMP threads
-      # run multiple times
+
+      # run 3 times
       ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
       ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
       ./${EXE} $NUM_PARTICLES $NUM_TIME_STEPS;echo
